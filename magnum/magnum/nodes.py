@@ -138,7 +138,13 @@ class OnStart:
     pos: Pos = _pos()
 
 
-Trigger = Union[Every, Arrival, OnStart]
+@dataclass(frozen=True)
+class When:
+    condition: Expr
+    pos: Pos = _pos()
+
+
+Trigger = Union[Every, Arrival, OnStart, When]
 
 
 # -------------------------------------------------------------------- события
@@ -198,6 +204,22 @@ class Default:
 class Controls:
     defaults: tuple[Default, ...]
     limits: tuple[Limit, ...]
+    pos: Pos = _pos()
+
+
+# --------------------------------------------------------- очереди и ресурсы
+@dataclass(frozen=True)
+class QueueOp:
+    op: str            # push | remove | clear | seize | release
+    target: str        # имя очереди / ресурса
+    value: Expr | None
+    pos: Pos = _pos()
+
+
+@dataclass(frozen=True)
+class PopAssign:
+    target: Expr       # Var | Instant | Index(...)
+    queue: str
     pos: Pos = _pos()
 
 

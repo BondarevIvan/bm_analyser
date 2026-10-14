@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import heapq
+import operator
 import itertools
 import math
 import random
@@ -18,7 +19,32 @@ from . import nodes as N
 from .builtins import ARRIVALS, BUILTINS, RESERVED_NAMES
 from .errors import MagnumControlError, MagnumRuntimeError, MagnumValidationError
 from .parser import parse
+from .queues import Queue, Resource, plain
 from .sampling import make_recorder
+
+# функции для очередей и ресурсов: имя -> (вид объекта, число аргументов)
+_STATEFUL_FUNCS = {
+    "size": ("queue", 1), "contains": ("queue", 2), "first": ("queue", 1),
+    "free": ("resource", 1), "busy": ("resource", 1), "capacity": ("resource", 1),
+}
+_KIND_RU = {"queue": "очередь", "resource": "ресурс"}
+_CTORS = ("queue", "resource")
+
+
+def _ctor_kind(expr):
+    """'queue' / 'resource', если выражение — вызов конструктора queue() / resource(...), иначе None."""
+    if isinstance(expr, N.Call) and not expr.user and expr.name in _CTORS:
+        return expr.name
+    return None
+
+
+class _CtorDefault:
+    """Очередь / ресурс, объявленные в controls: создаются заново в начале каждого запуска."""
+
+    def __init__(self, kind, capacity_fn, node):
+        self.kind = kind
+        self.capacity_fn = capacity_fn  # для ресурса: capacity из выражения (зависит от контролов)
+        self.node = node
 
 EPS = 1e-9  # допуск сравнения моментов времени (в днях)
 _NO_RETURN = object()
@@ -28,7 +54,12 @@ Value = Any  # float | list
 
 # =============================================================== утилиты
 def _copy(v):
-    return copy.deepcopy(v) if isinstance(v, list) else v
+    # числа неизменяемы — копируем только массивы (свой рекурсивный копир быстрее copy.deepcopy)
+    return _copy_list(v) if type(v) is list else v
+
+
+def _copy_list(v):
+    return [_copy_list(x) if type(x) is list else x for x in v]
 
 
 def _rt_error(node, msg):
@@ -54,8 +85,17 @@ def _fmt(v):
     return v
 
 
+def _obj(f, name, node):
+    """Очередь / ресурс по имени; понятная ошибка, если ещё не создан(а)."""
+    try:
+        return f.sim.globals[name]
+    except KeyError:
+        raise _rt_error(node, f"'{name}' ещё не создан(а): присвойте {name} = queue() / resource(...) "
+                              f"в controls или в do события, выполненного раньше") from None
+
+
 def _truth(v, node):
-    if isinstance(v, list):
+    if type(v) is list:
         raise _rt_error(node, "условие должно быть числом, получен массив")
     return v != 0
 
@@ -149,6 +189,12 @@ class _Compiler:
             return get_local
         if name == "TIME":  # текущее моделируемое время, в днях
             return lambda f: f.sim.time
+        kind = self.model._stateful.get(name)
+        if kind == "queue":
+            raise _val_error(node, f"'{name}' — очередь; используйте size({name}), contains({name}, x), "
+                                   f"first({name}) или x = pop {name}")
+        if kind == "resource":
+            raise _val_error(node, f"'{name}' — ресурс; используйте free({name}), busy({name}), capacity({name})")
         if name == "inf":
             return lambda f: math.inf
 
@@ -189,11 +235,13 @@ class _Compiler:
         if op in ("==", "!="):  # равенство допустимо и для массивов
             eq = op == "=="
             return lambda f: 1.0 if (l(f) == r(f)) == eq else 0.0
-        cmp = {"<": float.__lt__, "<=": float.__le__, ">": float.__gt__, ">=": float.__ge__}[op]
+        cmp = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge}[op]
 
         def compare(f):
-            a, b = _num(l(f), node), _num(r(f), node)
-            return 1.0 if cmp(float(a), float(b)) else 0.0
+            a, b = l(f), r(f)
+            if type(a) is list or type(b) is list:
+                _num(a, node), _num(b, node)
+            return 1.0 if cmp(a, b) else 0.0
         return compare
 
     def _e_Logic(self, node, scope):
@@ -219,15 +267,30 @@ class _Compiler:
 
     def _e_BinOp(self, node, scope):
         l, r, op = self.expr(node.left, scope), self.expr(node.right, scope), node.op
-        if op == "+":
-            return lambda f: _num(l(f), node) + _num(r(f), node)
-        if op == "-":
-            return lambda f: _num(l(f), node) - _num(r(f), node)
-        if op == "*":
-            return lambda f: _num(l(f), node) * _num(r(f), node)
+        if isinstance(node.left, N.Number) and isinstance(node.right, N.Number) and op != "^" \
+                and not (op == "/" and node.right.value == 0):
+            # свёртка констант: 60 * 7, 1 / 24 считаются один раз при загрузке
+            const = {"+": float.__add__, "-": float.__sub__, "*": float.__mul__, "/": float.__truediv__}[op](
+                node.left.value, node.right.value)
+            return lambda f: const
+        pyop = {"+": operator.add, "-": operator.sub, "*": operator.mul}.get(op)
+        if pyop is not None:
+            def arith(f):
+                a, b = l(f), r(f)
+                try:
+                    res = pyop(a, b)
+                except TypeError:
+                    res = None
+                if type(res) is float:  # быстрый путь: число op число
+                    return res
+                return pyop(_num(a, node), _num(b, node))  # массив — понятная ошибка; int — допустим
+            return arith
         if op == "/":
             def div(f):
-                a, b = _num(l(f), node), _num(r(f), node)
+                a, b = l(f), r(f)
+                if type(a) is float and type(b) is float and b != 0.0:
+                    return a / b
+                a, b = _num(a, node), _num(b, node)
                 if b == 0:
                     raise _rt_error(node, "деление на ноль")
                 return a / b
@@ -247,9 +310,68 @@ class _Compiler:
             return power
         raise AssertionError(op)  # pragma: no cover
 
+    def _stateful_arg(self, node, kind):
+        """Первый аргумент функции очереди/ресурса: имя объявленной очереди/ресурса."""
+        arg = node.args[0] if node.args else None
+        if not isinstance(arg, N.Var) or self.model._stateful.get(arg.name) != kind:
+            raise _val_error(node, f"{node.name}: первым аргументом ожидается {_KIND_RU[kind]}, объявленная в модели")
+        return arg.name
+
+    def _capacity_fn(self, node, scope):
+        """Выражение capacity из resource(capacity = ...) или resource(...)."""
+        if node.args and not node.kwargs and len(node.args) == 1:
+            expr = node.args[0]
+        elif not node.args and len(node.kwargs) == 1 and node.kwargs[0][0] == "capacity":
+            expr = node.kwargs[0][1]
+        else:
+            raise _val_error(node, "resource ожидает один аргумент: resource(capacity = ...)")
+        cap = self.expr(expr, scope)
+
+        def capacity(f):
+            c = cap(f)
+            if type(c) is list or c < 0 or c != int(c):
+                raise _rt_error(node, f"resource: capacity должна быть целым числом >= 0, получено {c!r}")
+            return int(c)
+        return capacity
+
+    def constructor(self, node, scope):
+        """queue() / resource(capacity = ...) -> функция, создающая новый объект."""
+        if node.name == "queue":
+            if node.args or node.kwargs:
+                raise _val_error(node, "queue() создаётся без аргументов")
+            return lambda f: Queue()
+        capacity = self._capacity_fn(node, scope)
+        return lambda f: Resource(capacity(f))
+
     def _e_Call(self, node, scope):
         if node.name == "if" and not node.user:
             return self._if(node, scope)
+        if node.name in _CTORS and not node.user:
+            raise _val_error(node, f"{node.name}(...) можно только присвоить переменной в do или в controls: "
+                                   f"имя = {node.name}(...)")
+        if node.name in _STATEFUL_FUNCS and not node.user:
+            kind, n_args = _STATEFUL_FUNCS[node.name]
+            if node.kwargs or len(node.args) != n_args:
+                raise _val_error(node, f"{node.name} ожидает {n_args} позиционных аргумента(ов)")
+            name = self._stateful_arg(node, kind)
+            fname = node.name
+            if fname == "size":
+                return lambda f: float(len(_obj(f, name, node)))
+            if fname == "contains":
+                x = self.expr(node.args[1], scope)
+                return lambda f: 1.0 if _obj(f, name, node).contains(x(f)) else 0.0
+            if fname == "first":
+                def first(f):
+                    try:
+                        return _obj(f, name, node).first()
+                    except IndexError:
+                        raise _rt_error(node, f"first({name}): очередь пуста") from None
+                return first
+            if fname == "free":
+                return lambda f: float(_obj(f, name, node).free)
+            if fname == "busy":
+                return lambda f: float(_obj(f, name, node).busy)
+            return lambda f: float(_obj(f, name, node).capacity)
         args = [self.expr(a, scope) for a in node.args]
         kwargs = [(k, self.expr(v, scope)) for k, v in node.kwargs]
         if node.user:
@@ -272,7 +394,8 @@ class _Compiler:
             hint = " (функцию модели вызывайте как `call имя(...)`)" if node.name in self.model._function_defs else ""
             raise _val_error(node, f"неизвестная встроенная функция '{node.name}'{hint}")
         if b.random and not scope.allow_random:
-            raise _val_error(node, f"случайная функция '{node.name}' недопустима в controls")
+            raise _val_error(node, f"случайная функция '{node.name}' недопустима "
+                                   f"{'в условии when' if scope.kind == 'trigger' else 'в controls'}")
         err = b.check_call(len(args), [k for k, _ in kwargs])
         if err:
             raise _val_error(node, f"{node.name}: неверные аргументы ({err})")
@@ -287,22 +410,118 @@ class _Compiler:
         return call_builtin
 
     # --------------------------------------------------------- присваивание
+    def _assign_ctor(self, node: N.Assign, scope: _Scope, kind):
+        """имя = queue() / имя = resource(...) в do события: создаёт новый (пустой / свободный) объект."""
+        if scope.kind != "event" or not isinstance(node.target, N.Var) or node.target.name in scope.locals:
+            raise _val_error(node, f"{kind}(...) можно присвоить только глобальной переменной в do события "
+                                   f"или в controls")
+        make = self.constructor(node.value, scope)
+        name = node.target.name
+
+        def create(f):
+            f.sim.globals[name] = make(f)
+            f.sim.changed.add(name)
+        return create
+
     def statement(self, node, scope: _Scope) -> Callable[[Frame], None]:
         if isinstance(node, N.Print):
             return self.print_(node, scope)
+        if isinstance(node, N.QueueOp):
+            return self.queue_op(node, scope)
+        if isinstance(node, N.PopAssign):
+            return self.pop_assign(node, scope)
         return self.assign(node, scope)
+
+    def _check_stateful(self, node, name, kind, op):
+        actual = self.model._stateful.get(name)
+        if actual != kind:
+            ctor = "queue()" if kind == "queue" else "resource(capacity = ...)"
+            raise _val_error(node, f"{op}: '{name}' не является {'очередью' if kind == 'queue' else 'ресурсом'} "
+                                   f"(создайте её в do или controls: {name} = {ctor})")
+
+    def queue_op(self, node: N.QueueOp, scope: _Scope) -> Callable[[Frame], None]:
+        name, op = node.target, node.op
+        kind = "queue" if op in ("push", "remove", "clear") else "resource"
+        self._check_stateful(node, name, kind, op)
+        if op in ("push", "remove"):
+            value = self.expr(node.value, scope)
+
+            def get_value(f):
+                v = value(f)
+                if type(v) is list:
+                    raise _rt_error(node, f"{op} {name}: в очереди хранятся числа, получен массив")
+                return v
+
+            if op == "push":
+                def push(f):
+                    _obj(f, name, node).push(get_value(f))
+                    f.sim.changed.add(name)
+                return push
+
+            def remove(f):
+                if _obj(f, name, node).remove(get_value(f)):
+                    f.sim.changed.add(name)
+            return remove
+        if op == "clear":
+            def clear(f):
+                q = _obj(f, name, node)
+                if len(q):
+                    q.clear()
+                    f.sim.changed.add(name)
+            return clear
+        if op == "seize":
+            def seize(f):
+                r = _obj(f, name, node)
+                if r.busy >= r.capacity:
+                    raise _rt_error(node, f"seize {name}: нет свободных единиц (занято {r.busy} из {r.capacity}); "
+                                          f"проверяйте free({name}) > 0, например в when")
+                r.busy += 1
+                f.sim.changed.add(name)
+            return seize
+
+        def release(f):
+            r = _obj(f, name, node)
+            if r.busy <= 0:
+                raise _rt_error(node, f"release {name}: ни одна единица ресурса не занята")
+            r.busy -= 1
+            f.sim.changed.add(name)
+        return release
+
+    def pop_assign(self, node: N.PopAssign, scope: _Scope) -> Callable[[Frame], None]:
+        name = node.queue
+        self._check_stateful(node, name, "queue", "pop")
+
+        def pop(f):
+            try:
+                x = _obj(f, name, node).pop()
+            except IndexError:
+                raise _rt_error(node, f"pop {name}: очередь пуста; проверяйте size({name}) > 0, например в when") from None
+            f.sim.changed.add(name)
+            return x
+        return self.assign(node, scope, value=pop)
 
     def print_(self, node: N.Print, scope: _Scope) -> Callable[[Frame], None]:
         """print(...) — отладочный вывод, как print в Python. Отключается run(debug=False)."""
-        parts = [(lambda f, s=a: s) if isinstance(a, str) else self.expr(a, scope) for a in node.args]
+        parts = []
+        for a in node.args:
+            if isinstance(a, str):
+                parts.append(lambda f, s=a: s)
+            elif isinstance(a, N.Var) and a.name in self.model._stateful and a.name not in scope.locals:
+                parts.append(lambda f, n=a.name: f.sim.globals[n])  # печатается как queue[...] / resource(...)
+            else:
+                parts.append(self.expr(a, scope))
 
         def do_print(f):
             if f.sim.debug:
                 print(*(_fmt(p(f)) for p in parts))
         return do_print
 
-    def assign(self, node: N.Assign, scope: _Scope) -> Callable[[Frame], None]:
-        value = self.expr(node.value, scope)
+    def assign(self, node, scope: _Scope, value=None) -> Callable[[Frame], None]:
+        kind = _ctor_kind(node.value) if isinstance(node, N.Assign) else None
+        if kind is not None:
+            return self._assign_ctor(node, scope, kind)
+        if value is None:
+            value = self.expr(node.value, scope)
         # разворачиваем цепочку a[i][j]
         indices, base = [], node.target
         while isinstance(base, N.Index):
@@ -315,6 +534,10 @@ class _Compiler:
         if isinstance(base, N.Var):
             if base.name in RESERVED_NAMES:
                 raise _val_error(base, f"'{base.name}' — зарезервированное имя, присваивать нельзя")
+            if base.name in self.model._stateful and not (scope.kind == "function" or base.name in scope.locals):
+                k = self.model._stateful[base.name]
+                raise _val_error(base, f"'{base.name}' — {_KIND_RU[k]}; присвоить можно только новую: "
+                                       f"{base.name} = {'queue()' if k == 'queue' else 'resource(capacity = ...)'}")
             if base.name in scope.locals and scope.readonly_locals:
                 raise _val_error(base, f"параметр события '{base.name}' нельзя изменять (используйте instant[...])")
 
@@ -403,6 +626,7 @@ class Model:
         self.events: dict[str, _CEvent] = {}
         self.defaults: dict[str, Value] = {}
         self.limits: dict[str, _Limit] = {}
+        self._stateful: dict[str, str] = {}               # имя -> "queue" | "resource"
         self._build()
 
     # -------------------------------------------------------- построение
@@ -410,10 +634,13 @@ class Model:
         d = self.definition
         comp = _Compiler(self)
 
-        # 1. controls
+        # 0. очереди и ресурсы: имя = queue() / resource(...) в controls или в do событий
         if len(d.controls) > 1:
             raise _val_error(d.controls[1], "секция controls должна быть одна")
         ctrl = d.controls[0] if d.controls else N.Controls((), ())
+        self._scan_stateful(ctrl, d.events)
+
+        # 1. controls
         const_sim = _ConstSim(self.defaults)
         const_scope = _Scope("const", "controls", allow_random=False)
         for item in ctrl.defaults:
@@ -421,8 +648,16 @@ class Model:
                 raise _val_error(item, f"'{item.name}' — зарезервированное имя")
             if item.name in self.defaults:
                 raise _val_error(item, f"контрол '{item.name}' объявлен дважды")
+            kind = _ctor_kind(item.value)
             try:
-                self.defaults[item.name] = comp.expr(item.value, const_scope)(Frame({}, {}, const_sim))
+                if kind is not None:
+                    comp.constructor(item.value, const_scope)  # проверка аргументов
+                    cap_fn = comp._capacity_fn(item.value, const_scope) if kind == "resource" else None
+                    if cap_fn is not None:
+                        cap_fn(Frame({}, {}, const_sim))  # проверка значения по умолчанию
+                    self.defaults[item.name] = _CtorDefault(kind, cap_fn, item)
+                else:
+                    self.defaults[item.name] = comp.expr(item.value, const_scope)(Frame({}, {}, const_sim))
             except MagnumRuntimeError as e:
                 raise MagnumValidationError(f"значение контрола '{item.name}': {e.message}", e.line, e.column) from None
         for lim in ctrl.limits:
@@ -439,9 +674,14 @@ class Model:
             self.limits[lim.name] = _Limit(lo, lim.lower_closed, hi, lim.upper_closed)
         for name, value in self.defaults.items():
             if name in self.limits:
+                if isinstance(value, _CtorDefault):
+                    if value.kind == "queue":
+                        raise _val_error(next(lim for lim in ctrl.limits if lim.name == name),
+                                         f"limits: '{name}' — очередь, ограничения для неё не задаются")
+                    value = float(value.capacity_fn(Frame({}, {}, const_sim)))
                 self._check_limit(name, value, MagnumValidationError, "значение по умолчанию")
 
-        # 2. функции (сначала собираем сигнатуры — функции могут вызывать друг друга)
+        # 3. функции (сначала собираем сигнатуры — функции могут вызывать друг друга)
         for fdef in d.functions:
             if fdef.name in self._function_defs:
                 raise _val_error(fdef, f"функция '{fdef.name}' объявлена дважды")
@@ -460,13 +700,37 @@ class Model:
         for ev in d.events:
             self.events[ev.name] = self._compile_event(comp, ev)
 
-    @staticmethod
-    def _check_params(node, params):
+    def _scan_stateful(self, ctrl, events):
+        """Найти все `имя = queue()` / `имя = resource(...)` (в controls и в do) и запомнить вид каждого имени."""
+        found = [(item.name, _ctor_kind(item.value), item) for item in ctrl.defaults if _ctor_kind(item.value)]
+        for ev in events:
+            for st in ev.do:
+                if isinstance(st, N.Assign) and _ctor_kind(st.value):
+                    if not isinstance(st.target, N.Var):
+                        raise _val_error(st, f"{_ctor_kind(st.value)}(...) можно присвоить только переменной, "
+                                             f"не элементу массива и не instant[...]")
+                    found.append((st.target.name, _ctor_kind(st.value), st))
+        for name, kind, node in found:
+            if name in RESERVED_NAMES:
+                raise _val_error(node, f"'{name}' — зарезервированное имя")
+            prev = self._stateful.get(name)
+            if prev is not None and prev != kind:
+                raise _val_error(node, f"'{name}' уже объявлен(а) как {_KIND_RU[prev]}")
+            self._stateful[name] = kind
+        numeric_controls = {item.name for item in ctrl.defaults if not _ctor_kind(item.value)}
+        for name in self._stateful:
+            if name in numeric_controls:
+                node = next(n for nm, _, n in found if nm == name)
+                raise _val_error(node, f"'{name}' уже объявлен как числовой контрол")
+
+    def _check_params(self, node, params):
         if len(set(params)) != len(params):
             raise _val_error(node, "повторяющиеся имена параметров")
         for p in params:
             if p in RESERVED_NAMES:
                 raise _val_error(node, f"'{p}' — зарезервированное имя, нельзя использовать как параметр")
+            if p in self._stateful:
+                raise _val_error(node, f"'{p}' — имя очереди/ресурса, нельзя использовать как параметр")
 
     def _compile_function(self, comp, fdef: N.Function):
         assigned = set()
@@ -498,6 +762,45 @@ class Model:
                     return r
             raise _rt_error(call_node, f"функция '{name}' завершилась без return")  # pragma: no cover
         return run
+
+    def _condition_deps(self, cond) -> frozenset:
+        """Глобальные переменные, от которых зависит условие when (с учётом вызываемых функций модели)."""
+        deps: set[str] = set()
+        seen_functions: set[str] = set()
+
+        def walk(node, local_names):
+            if isinstance(node, N.Var):
+                if node.name == "TIME":
+                    raise _val_error(node, "when: условие не может зависеть от TIME — "
+                                           "для времени используйте every / after")
+                if node.name not in local_names and node.name not in RESERVED_NAMES:
+                    deps.add(node.name)
+                return
+            if isinstance(node, N.Call):
+                if node.user and node.name in self._function_defs and node.name not in seen_functions:
+                    seen_functions.add(node.name)
+                    fdef = self._function_defs[node.name]
+                    f_locals = set(fdef.params)
+                    for st in fdef.body:
+                        if isinstance(st, N.Assign):
+                            base = st.target
+                            while isinstance(base, N.Index):
+                                base = base.target
+                            if isinstance(base, N.Var):
+                                f_locals.add(base.name)
+                    for st in fdef.body:
+                        walk(st, f_locals)
+            for value in vars(node).values():
+                for child in (value if isinstance(value, tuple) else (value,)):
+                    if isinstance(child, tuple):  # kwargs: (имя, выражение)
+                        child = child[1]
+                    if hasattr(child, "pos") and not isinstance(child, N.Pos):
+                        walk(child, local_names)
+
+        walk(cond, frozenset())
+        if not deps:
+            raise _val_error(cond, "when: условие не зависит ни от одной переменной модели — оно никогда не изменится")
+        return frozenset(deps)
 
     def _compile_emit(self, comp, em: N.Emit, scope):
         target = self.events.get(em.event, False)
@@ -531,6 +834,10 @@ class Model:
         for t in ev.triggers:
             if isinstance(t, N.OnStart):
                 triggers.append(("start", None))
+            elif isinstance(t, N.When):
+                when_scope = _Scope("trigger", ev.name, allow_random=False)
+                cond = comp.expr(t.condition, when_scope)
+                triggers.append(("when", (cond, self._condition_deps(t.condition)), t))
             elif isinstance(t, N.Every):
                 triggers.append(("every", comp.expr(t.period, trig_scope), t))
             else:
@@ -562,21 +869,44 @@ class Model:
 
     def resolve_controls(self, controls: Mapping[str, Any] | None) -> dict[str, Value]:
         """Значения по умолчанию, перекрытые переданными контролами, с проверкой limits."""
-        result = {k: copy.deepcopy(v) for k, v in self.defaults.items()}
+        result = {k: (v if isinstance(v, _CtorDefault) else copy.deepcopy(v)) for k, v in self.defaults.items()}
         for name, raw in (controls or {}).items():
             if name not in self.defaults:
                 raise MagnumControlError(f"неизвестный контрол '{name}' (доступны: {', '.join(self.defaults) or 'нет'})")
             value = _normalize_value(raw, name)
+            default = self.defaults[name]
+            if isinstance(default, _CtorDefault):
+                if default.kind == "queue":
+                    # начальное содержимое очереди — список чисел
+                    if not isinstance(value, list) or any(isinstance(x, list) for x in value):
+                        raise MagnumControlError(f"контрол '{name}' — очередь: ожидается список чисел")
+                elif isinstance(value, list) or value < 0 or value != int(value):
+                    raise MagnumControlError(f"контрол '{name}' — ресурс: ожидается capacity, целое число >= 0")
+                else:
+                    self._check_limit(name, value, MagnumControlError, "контрол")
+                result[name] = value
+                continue
             if _shape(value) != _shape(self.defaults[name]):
                 raise MagnumControlError(
                     f"контрол '{name}': форма {_shape(value)} не совпадает с формой по умолчанию {_shape(self.defaults[name])}")
             self._check_limit(name, value, MagnumControlError, "контрол")
             result[name] = value
+        # очереди и ресурсы из controls без переданного значения: пустая очередь, capacity из выражения
+        numeric = {k: v for k, v in result.items() if not isinstance(v, _CtorDefault)}
+        for name, v in list(result.items()):
+            if isinstance(v, _CtorDefault):
+                if v.kind == "queue":
+                    result[name] = []
+                else:
+                    cap = v.capacity_fn(Frame({}, {}, _ConstSim(numeric)))
+                    self._check_limit(name, float(cap), MagnumControlError, "контрол")
+                    result[name] = float(cap)
         return result
 
     # --------------------------------------------------------------- запуск
     def run(self, controls: Mapping[str, Any] | None = None, seed: int | None = 0, horizon: float = 365,
-            sampling: str | float = "1d", max_events: int = 10_000_000, debug: bool = True) -> dict:
+            sampling: str | float = "1d", max_events: int = 10_000_000, debug: bool = True,
+            record=None) -> dict:
         """Запустить модель.
 
         :param controls: значения контролов (перекрывают default; проверяются по limits)
@@ -586,9 +916,11 @@ class Model:
             снимок всех переменных с этим шагом; 'on_change' — запись переменной при её изменении
         :param max_events: предохранитель от бесконечной генерации событий
         :param debug: выполнять ли print(...) из модели (False — для массовых прогонов)
+        :param record: какие переменные записывать в result["variables"] (список имён; None — все).
+            Ускоряет расчёт, особенно с sampling='on_change' и большими массивами. final содержит все переменные.
         :return: словарь, см. :class:`Simulation.result`
         """
-        sim = Simulation(self, controls, seed, horizon, sampling, max_events)
+        sim = Simulation(self, controls, seed, horizon, sampling, max_events, record)
         sim.debug = debug
         return sim.run()
 
@@ -597,21 +929,28 @@ class Model:
 
 
 # ============================================================== симуляция
-@dataclass
 class _Occurrence:
-    event: str
-    args: tuple
-    trigger: int | None = None      # индекс триггера, породившего событие (None — emit / on start)
-    anchor: float = 0.0             # для every: время = anchor + k * period (без накопления ошибки)
-    k: int = 0
-    period: float = 0.0
+    """Запланированное срабатывание события.
+    trigger — индекс триггера, породившего событие (None — emit / on start);
+    для every: время = anchor + k * period (без накопления ошибки)."""
+
+    __slots__ = ("event", "args", "trigger", "anchor", "k", "period")
+
+    def __init__(self, event, args, trigger=None, anchor=0.0, k=0, period=0.0):
+        self.event = event
+        self.args = args
+        self.trigger = trigger
+        self.anchor = anchor
+        self.k = k
+        self.period = period
 
 
 _BOOTSTRAP = "__bootstrap__"
+_NO_PARAMS: dict = {}
 
 
 class Simulation:
-    def __init__(self, model: Model, controls, seed, horizon, sampling, max_events):
+    def __init__(self, model: Model, controls, seed, horizon, sampling, max_events, record=None):
         if horizon < 0:
             raise ValueError("horizon должен быть >= 0")
         self.model = model
@@ -621,14 +960,27 @@ class Simulation:
         self.max_events = max_events
         self.debug = True
         self.sampling = sampling
-        self.recorder = make_recorder(sampling, self.horizon)
+        self.recorder = make_recorder(sampling, self.horizon, record)
         self.changed: set[str] = set()  # глобальные переменные, изменённые текущим событием
         self.controls = model.resolve_controls(controls)
         self.globals: dict[str, Value] = copy.deepcopy(self.controls)
+        for name, v in model.defaults.items():  # очереди и ресурсы из controls -> объекты
+            if isinstance(v, _CtorDefault):
+                if v.kind == "queue":
+                    q = Queue()
+                    for x in self.controls[name]:
+                        q.push(x)
+                    self.globals[name] = q
+                else:
+                    self.globals[name] = Resource(int(self.controls[name]))
         self.time = 0.0
         self._heap: list = []
         self._seq = itertools.count()
         self.event_counts = {name: 0 for name in model.events}
+        # события с триггером when: (событие, индекс триггера, условие, зависимости)
+        self._when = [(ev, ti, trig[1][0], trig[1][1]) for ev in model.events.values()
+                      for ti, trig in enumerate(ev.triggers) if trig[0] == "when"]
+        self._when_pending: set[str] = set()
 
     def schedule(self, t: float, event: str, args: tuple = (), **occ_kw):
         heapq.heappush(self._heap, (t, next(self._seq), _Occurrence(event, args, **occ_kw)))
@@ -636,6 +988,9 @@ class Simulation:
     # --------------------------------------------------------------- триггеры
     def _schedule_trigger(self, ev: _CEvent, ti: int, prev: _Occurrence | None):
         trig = ev.triggers[ti]
+        if trig[0] == "when":
+            self._when_pending.discard(ev.name)
+            return
         frame = Frame({}, None, self)
         if trig[0] == "every":
             period = trig[1](frame)
@@ -660,14 +1015,16 @@ class Simulation:
         if occ.event == _BOOTSTRAP:
             for ev in self.model.events.values():
                 for ti, trig in enumerate(ev.triggers):
-                    if trig[0] != "start":
+                    if trig[0] not in ("start", "when"):
                         self._schedule_trigger(ev, ti, None)
+            self._check_when(None)  # первая проверка условий when — после on start
             return
         ev = self.model.events[occ.event]
         # 1. trigger — планируем следующее срабатывание
         if occ.trigger is not None:
             self._schedule_trigger(ev, occ.trigger, occ)
-        frame = Frame(dict(zip(ev.params, occ.args)), {}, self)
+        # параметры события только читаются — для событий без параметров словарь не создаём
+        frame = Frame(dict(zip(ev.params, occ.args)) if ev.params else _NO_PARAMS, {}, self)
         # 2. do
         for st in ev.do:
             st(frame)
@@ -693,9 +1050,25 @@ class Simulation:
             em(frame)
         self.event_counts[ev.name] += 1
 
+    # ------------------------------------------------------------------ when
+    def _check_when(self, changed):
+        """Проверить условия when, зависящие от изменённых переменных (changed=None — все).
+        Истинное условие планирует событие на текущий момент, если оно ещё не ожидает выполнения."""
+        frame = None
+        for ev, ti, cond, deps in self._when:
+            if ev.name in self._when_pending:
+                continue
+            if changed is not None and deps.isdisjoint(changed):
+                continue
+            if frame is None:
+                frame = Frame(_NO_PARAMS, None, self)
+            if _truth(cond(frame), ev.triggers[ti][2]):
+                self._when_pending.add(ev.name)
+                self.schedule(self.time, ev.name, (), trigger=ti)
+
     # ---------------------------------------------------------------- цикл
     def _snapshot(self):
-        return {k: _copy(v) for k, v in self.globals.items()}
+        return {k: plain(v) for k, v in self.globals.items()}
 
     def run(self) -> dict:
         rec = self.recorder
@@ -707,16 +1080,28 @@ class Simulation:
         rec.start(self.globals)
 
         processed = 0
-        while self._heap:
-            t = self._heap[0][0]
-            if t > self.horizon + EPS:
+        heap, heappop, process, changed, globals_ = self._heap, heapq.heappop, self._process, self.changed, self.globals
+        limit = self.horizon + EPS
+        has_when = bool(self._when)
+        tracks_changes = rec.tracks_changes or has_when
+        next_due = rec.next_due
+        while heap:
+            t = heap[0][0]
+            if t > limit:
                 break
-            _, _, occ = heapq.heappop(self._heap)
-            rec.before_event(t, self.globals)
+            occ = heappop(heap)[2]
+            if t > next_due + EPS:  # пора снять периодический снимок (до события)
+                rec.before_event(t, globals_)
+                next_due = rec.next_due
             self.time = t
-            self.changed.clear()
-            self._process(occ)
-            rec.after_event(t, self.globals, self.changed)
+            if tracks_changes:
+                changed.clear()
+                process(occ)
+                rec.after_event(t, globals_, changed)
+                if has_when and changed:
+                    self._check_when(changed)
+            else:
+                process(occ)
             processed += 1
             if processed > self.max_events:
                 raise MagnumRuntimeError(
@@ -749,9 +1134,9 @@ def load_model_file(path: str | Path, encoding: str = "utf-8") -> Model:
 
 def run_model(model: Model | str, controls: Mapping[str, Any] | None = None, seed: int | None = 0,
               horizon: float = 365, sampling: str | float = "1d", max_events: int = 10_000_000,
-              debug: bool = True) -> dict:
+              debug: bool = True, record=None) -> dict:
     """Запустить модель (объект Model или текст модели). См. :meth:`Model.run`."""
     if isinstance(model, str):
         model = load_model(model)
     return model.run(controls=controls, seed=seed, horizon=horizon, sampling=sampling, max_events=max_events,
-                     debug=debug)
+                     debug=debug, record=record)

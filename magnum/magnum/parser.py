@@ -58,6 +58,19 @@ class _Builder(Transformer):
             pos=_pos(meta),
         )
 
+    # -------------------------------------------------- очереди и ресурсы
+    def _queue_op(op):  # noqa: N805
+        def method(self, meta, ch):
+            return N.QueueOp(op, str(ch[0]), ch[1] if len(ch) > 1 else None, pos=_tok_pos(ch[0]))
+        return method
+
+    push_stmt, remove_stmt, clear_stmt = _queue_op("push"), _queue_op("remove"), _queue_op("clear")
+    seize_stmt, release_stmt = _queue_op("seize"), _queue_op("release")
+    del _queue_op
+
+    def pop_stmt(self, meta, ch):
+        return N.PopAssign(ch[0], str(ch[1]), pos=_pos(meta))
+
     # ----------------------------------------------------------- controls
     def controls(self, meta, ch):
         defaults, limits = [], []
@@ -141,6 +154,9 @@ class _Builder(Transformer):
         name, arguments = ch
         args, kwargs = arguments or ((), ())
         return N.Arrival(str(name), args, kwargs, pos=_tok_pos(name))
+
+    def when_trigger(self, meta, ch):
+        return N.When(ch[0], pos=_pos(meta))
 
     def start_trigger(self, meta, ch):
         return N.OnStart(pos=_pos(meta))

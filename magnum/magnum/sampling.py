@@ -15,17 +15,23 @@ import math
 import re
 
 from .parser import DURATION_UNITS
+from .queues import plain as _copy  # копия массива / развёрнутая очередь и ресурс
 
 EPS = 1e-9
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?|\.\d+)\s*([wdhms])\s*$")
 
 
-def _copy(v):
-    return copy.deepcopy(v) if isinstance(v, list) else v
+def make_recorder(spec, horizon: float, record=None):
+    """Создать объект записи по строке политики. record — имена переменных для записи (None — все)."""
+    rec = _make_recorder(spec, horizon)
+    if record is not None:
+        if isinstance(record, str):
+            record = [record]
+        rec.record = frozenset(record)
+    return rec
 
 
-def make_recorder(spec, horizon: float):
-    """Создать объект записи по строке политики."""
+def _make_recorder(spec, horizon: float):
     if isinstance(spec, bool):
         raise ValueError(f"sampling: неверная политика {spec!r}")
     if isinstance(spec, (int, float)):
@@ -47,8 +53,12 @@ def make_recorder(spec, horizon: float):
 
 
 class _Recorder:
+    next_due = math.inf      # ближайший момент снимка (для периодической записи)
+    tracks_changes = False   # нужен ли список изменённых переменных после каждого события
+
     def __init__(self):
         self.series: dict[str, dict[str, list]] = {}
+        self.record = None   # frozenset имён или None — все переменные
 
     def _append(self, name, t, value):
         s = self.series.get(name)
@@ -81,12 +91,16 @@ class PeriodicRecorder(_Recorder):
         n = int(math.floor(horizon / period + EPS)) + 1
         self.times = [round(i * period, 12) for i in range(n)]
         self._i = 0
+        self.next_due = self.times[0]
 
     def _take(self, globals_):
         t = self.times[self._i]
+        record = self.record
         for name, value in globals_.items():
-            self._append(name, t, value)
+            if record is None or name in record:
+                self._append(name, t, value)
         self._i += 1
+        self.next_due = self.times[self._i] if self._i < len(self.times) else math.inf
 
     def before_event(self, t, globals_):
         while self._i < len(self.times) and self.times[self._i] < t - EPS:
@@ -101,13 +115,18 @@ class OnChangeRecorder(_Recorder):
     """Значение переменной сохраняется, когда оно меняется.
     Несколько изменений в один и тот же момент времени схлопываются в одно (последнее) значение."""
 
+    tracks_changes = True
+
     def start(self, globals_):
         for name, value in globals_.items():  # начальные значения контролов
-            self._append(name, 0.0, value)
+            if self.record is None or name in self.record:
+                self._append(name, 0.0, value)
 
     def after_event(self, t, globals_, changed):
+        record = self.record
         for name in changed:
-            self._record(name, t, globals_[name])
+            if record is None or name in record:
+                self._record(name, t, _copy(globals_[name]))
 
     def _record(self, name, t, value):
         s = self.series.get(name)

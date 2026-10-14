@@ -104,3 +104,15 @@ def test_on_change_same_as_periodic_final_state():
 def test_bad_sampling(spec):
     with pytest.raises(ValueError, match="sampling"):
         run_model(wrap(HOURLY), horizon=1, sampling=spec)
+
+
+@pytest.mark.parametrize("spec", ["1d", "on_change"])
+def test_record_filters_variables(spec):
+    text = wrap(COUNTER + "event tick { do { n = n + 1  m = n * 2  big = create_array(100) } trigger { every 1h } }")
+    full = run_model(text, horizon=2, sampling=spec)
+    part = run_model(text, horizon=2, sampling=spec, record=["n"])
+    assert set(part["variables"]) == {"n"}
+    assert part["variables"]["n"] == full["variables"]["n"]
+    assert part["final"] == full["final"]           # final — всегда все переменные
+    assert run_model(text, horizon=2, sampling=spec, record="m")["variables"].keys() == {"m"}
+    assert run_model(text, horizon=2, sampling=spec, record=[])["variables"] == {}

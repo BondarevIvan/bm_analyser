@@ -34,7 +34,17 @@ return_stmt: "return" expr
 event_def: "event" NAME ["(" [param_list] ")"] "{" _event_section* "}"
 _event_section: do_block | trigger_block | choose_block | emit_stmt
 
-do_block: "do" "{" (assignment | print_stmt)* "}"
+do_block: "do" "{" _do_stmt* "}"
+_do_stmt: assignment | print_stmt | pop_stmt | push_stmt | remove_stmt | clear_stmt | seize_stmt | release_stmt
+
+// очереди и ресурсы создаются присваиванием в controls или do: q = queue(), r = resource(capacity = 3)
+// операции с ними (только в do событий):
+push_stmt: "push" NAME "(" expr ")"       // в хвост очереди
+remove_stmt: "remove" NAME "(" expr ")"   // убрать значение (если есть)
+clear_stmt: "clear" NAME                  // очистить очередь
+pop_stmt: target "=" "pop" NAME           // взять из головы очереди
+seize_stmt: "seize" NAME                  // занять единицу ресурса
+release_stmt: "release" NAME              // освободить единицу ресурса
 
 // отладочный вывод: print(x, "текст", a + b) — как print в Python
 print_stmt: "print" "(" [_print_arg ("," _print_arg)*] ")"
@@ -45,6 +55,7 @@ trigger_block: "trigger" "{" trigger* "}"
 trigger: "every" expr                         -> every_trigger
        | "arrival" NAME "(" [arguments] ")"   -> arrival_trigger
        | "on" "start"                         -> start_trigger
+       | "when" expr                          -> when_trigger   // срабатывает, пока условие истинно
 
 choose_block: "choose" "{" branch* "}"
 // в ветке может быть несколько emit подряд — выполняются все, в порядке записи

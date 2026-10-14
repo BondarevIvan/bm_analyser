@@ -1,0 +1,153 @@
+
+model "Кофейня" {
+
+    function mod(lhs, m) {
+        return lhs - floor(lhs / m) * m
+    }
+
+    function is_open(time) {
+        hour = (time - floor(time)) * 24
+        return if(hour >= open_hour, if(hour <= close_hour, 1, 0), 0)
+    }
+
+    function time_to_open_as_days(time, tolerance) {
+        frac_part_time = time - floor(time)
+        hour = frac_part_time * 24
+
+        return if(
+                hour >= close_hour,
+                1 - frac_part_time + open_hour / 24 + tolerance,
+                if(hour <= open_hour, open_hour / 24 - frac_part_time + tolerance, 0)
+            )
+    }
+
+    controls {
+        default {
+            open_hour = 8
+            close_hour = 22
+            average_duration_order = 60 * 7 # s
+            average_count_clients_per_1h = 10
+
+            #
+            average_wait = 5 * 60 # s
+            std_wait = 30 # s
+
+            #
+            count_masters = 2
+        }
+        limits {
+            open_hour in [8, 8]
+            close_hour in [22, 22]
+        }
+    }
+
+    event ClientHasLost {
+        do {
+            count_lost = count_lost + 1
+        }
+    }
+
+    # Мастер смотрит на клиента в голове очереди (ptr):
+    # - клиент ждёт -> обслуживает его, следующий заказ берёт через instant[delay];
+    # - клиент ушёл (ячейка 0) -> пропускает его сразу;
+    # - очередь пуста -> проверяет снова через минуту.
+    # ptr сдвигается прямо в do, чтобы два мастера в один момент не взяли одного клиента.
+    event ExecuteOrder {
+        do {
+            instant[delay] = exponential(average_duration_order) * 1s
+            instant[not_empty] = if(ptr < queue_size, 1, 0)
+            instant[has_order] = if(instant[not_empty] and queue[ptr] > 0.5, 1, 0)
+            instant[go_to_next] = instant[not_empty] - instant[has_order]
+            instant[idle] = 1 - instant[not_empty]
+            ptr = ptr + instant[not_empty]
+            count_served = count_served + instant[has_order]
+        }
+        choose {
+            instant[has_order]: emit OrderDone after instant[delay]
+                                emit ExecuteOrder after instant[delay]
+            instant[go_to_next]: emit ExecuteOrder
+                                 emit ClientHasLost
+            instant[idle]: emit ExecuteOrder after 1m
+        }
+    }
+
+    # Заказ готов — клиент обработан
+    event OrderDone {
+        do {
+            count_processed = count_processed + 1
+        }
+    }
+
+    event ClientLeave(pos_in_arr) {
+        do {
+            queue[pos_in_arr] = 0
+        }
+    }
+
+    event RegisterClient {
+        do {
+            instant[pos] = queue_size
+            instant[delay] = max(0, normal(average_wait, std_wait)) * 1s
+
+            queue[instant[pos]] = 1
+            queue_size = queue_size + 1
+
+        }
+        emit ClientLeave(instant[pos]) after instant[delay]
+    }
+
+    # Очередной приход клиента. Если кофейня открыта — клиент регистрируется;
+    # следующий приход — через exponential, а если закрыто — через exponential после открытия.
+    event VisitClientGenerator {
+        do {
+            instant[is_open] = call is_open(TIME)
+            instant[is_closed] = 1 - instant[is_open]
+            instant[day_to_open] = call time_to_open_as_days(TIME, 0.0001)
+            instant[delay] = exponential(1/average_count_clients_per_1h) * 1h
+        }
+        choose {
+            instant[is_open]: emit RegisterClient
+                              emit VisitClientGenerator after instant[delay]
+            instant[is_closed]: emit VisitClientGenerator after instant[day_to_open] * 1d + instant[delay]
+        }
+    }
+
+    event Open {
+        do {
+            queue = create_array(1000, value=0)
+            queue_size = 0
+            ptr = 0
+        }
+        trigger {
+            every 1d
+        }
+    }
+
+    event ExecuteOrderCycle(cnt) {
+        do {
+            instant[go_next] = if(cnt > 1.5, 1, 0)
+        }
+        choose {
+            instant[go_next]: emit ExecuteOrderCycle(cnt - 1)
+        }
+        emit ExecuteOrder
+    }
+
+    event _init {
+        do {
+            count_lost = 0
+            count_served = 0       # начали обслуживать
+            count_processed = 0    # заказ готов
+
+            queue = create_array(1000, value=0)
+            queue_size = 0
+            ptr = 0
+        }
+        trigger {
+            on start
+        }
+        emit ExecuteOrderCycle(count_masters)
+        emit Open after open_hour * 1h
+        emit VisitClientGenerator
+    }
+}

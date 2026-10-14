@@ -1,0 +1,123 @@
+// =====================================================================
+//  Грамматика языка Magnum (описание бизнес-модели как случайного процесса)
+//  Парсер: lark, алгоритм LALR(1), контекстный лексер.
+//  Пробелы, переводы строк и комментарии (# ... до конца строки) игнорируются.
+// =====================================================================
+
+start: model
+
+// ---------------------------------------------------------------- модель
+model: "model" STRING "{" _model_item* "}"
+_model_item: controls | function_def | event_def
+
+// --------------------------------------------------------------- controls
+controls: "controls" "{" _controls_section* "}"
+_controls_section: defaults | limits
+
+defaults: "default" "{" default_item* "}"
+default_item: NAME "=" expr
+
+limits: "limits" "{" limit_item* "}"
+limit_item: NAME "in" lower_bound "," upper_bound
+lower_bound: "[" expr               -> closed_lower
+           | "(" expr               -> open_lower
+upper_bound: expr "]"               -> closed_upper
+           | expr ")"               -> open_upper
+
+// -------------------------------------------------------------- функции
+function_def: "function" NAME "(" [param_list] ")" "{" _function_stmt* "}"
+param_list: NAME ("," NAME)*
+_function_stmt: assignment | return_stmt | print_stmt
+return_stmt: "return" expr
+
+// --------------------------------------------------------------- события
+event_def: "event" NAME ["(" [param_list] ")"] "{" _event_section* "}"
+_event_section: do_block | trigger_block | choose_block | emit_stmt
+
+do_block: "do" "{" (assignment | print_stmt)* "}"
+
+// отладочный вывод: print(x, "текст", a + b) — как print в Python
+print_stmt: "print" "(" [_print_arg ("," _print_arg)*] ")"
+_print_arg: expr | string_lit
+string_lit: STRING
+
+trigger_block: "trigger" "{" trigger* "}"
+trigger: "every" expr                         -> every_trigger
+       | "arrival" NAME "(" [arguments] ")"   -> arrival_trigger
+       | "on" "start"                         -> start_trigger
+
+choose_block: "choose" "{" branch* "}"
+// в ветке может быть несколько emit подряд — выполняются все, в порядке записи
+branch: expr ":" emit_stmt+
+
+emit_stmt: "emit" NAME ["(" [arguments] ")"] ["after" expr]
+
+// ------------------------------------------------------------ присваивание
+assignment: target "=" expr
+target: (NAME | instant_ref) ("[" expr "]")*
+instant_ref: "instant" "[" NAME "]"
+
+// --------------------------------------------------------------- выражения
+// приоритет (от слабого к сильному):
+//   or  |  and  |  not  |  сравнения  |  + -  |  * /  |  унарный -  |  ^  |  индексация
+// логические значения: истина — любое ненулевое число; результат сравнения/логики — 1 или 0
+?expr: or_expr
+
+?or_expr: and_expr
+        | or_expr "or" and_expr      -> or_op
+
+?and_expr: not_expr
+         | and_expr "and" not_expr   -> and_op
+
+?not_expr: comparison
+         | "not" not_expr            -> not_op
+
+// сравнения не цепочечные: a < b < c — ошибка синтаксиса
+?comparison: sum
+           | sum COMP_OP sum         -> compare
+
+?sum: product
+    | sum "+" product                -> add
+    | sum "-" product                -> sub
+
+?product: unary
+        | product "*" unary          -> mul
+        | product "/" unary          -> div
+
+?unary: power
+      | "-" unary                    -> neg
+      | "+" unary
+
+// ^ правоассоциативен: 2^3^2 = 2^(3^2); -2^2 = -(2^2)
+?power: postfix
+      | postfix "^" unary            -> pow
+
+?postfix: atom
+        | postfix "[" expr "]"       -> index
+
+?atom: NUMBER                        -> number
+     | DURATION                      -> duration
+     | NAME                          -> var
+     | instant_ref
+     | "call" NAME "(" [arguments] ")"   -> user_call
+     | NAME "(" [arguments] ")"          -> builtin_call
+     | "[" [expr ("," expr)*] "]"        -> array
+     | "(" expr ")"
+
+arguments: _argument ("," _argument)*
+_argument: expr | kwarg
+kwarg: NAME "=" expr
+
+// ------------------------------------------------------------- терминалы
+COMP_OP: "<=" | ">=" | "==" | "!=" | "<" | ">"
+// длительность: число + единица (w — недели, d — дни, h — часы, m — минуты, s — секунды)
+DURATION.2: /\d+(\.\d+)?[wdhms](?!\w)/
+NUMBER: /\d+(\.\d+)?([eE][+-]?\d+)?/ | /\.\d+([eE][+-]?\d+)?/
+// имена: латиница/кириллица/цифры/подчёркивание, не с цифры
+NAME: /(?!\d)\w+/
+STRING: /"(\\.|[^"\\])*"/
+
+COMMENT: /#[^\n]*/
+%ignore COMMENT
+%import common.WS
+%ignore WS

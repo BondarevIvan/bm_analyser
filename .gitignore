@@ -1,0 +1,43 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.so
+
+# сборка и установка пакета (pip install -e создаёт *.egg-info)
+*.egg-info/
+.eggs/
+build/
+dist/
+*.whl
+
+# тесты и инструменты
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.ipynb_checkpoints/
+
+# --- виртуальные окружения ---
+venv/
+.venv/
+env/
+.env
+
+# --- результаты прогонов моделей ---
+.dump
+*.dump
+result.json
+coffee_result.json
+*_result.json
+# графики в корне проекта (dep.png, a.png, ...)
+/*.png
+
+# --- редакторы и ОС ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

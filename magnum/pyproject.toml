@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "magnum"
+version = "0.1.0"
+description = "Язык описания бизнес-модели как случайного процесса и движок его расчёта"
+requires-python = ">=3.9"
+dependencies = ["lark>=1.1"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["magnum"]
+
+[tool.setuptools.package-data]
+magnum = ["grammar.lark"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]

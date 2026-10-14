@@ -1,0 +1,40 @@
+model "Простой пример сумматора" {
+
+    controls {
+        default {
+            value = 1
+        }
+        limits {
+            value in [-10, 100]
+        }
+    }
+
+    event _init {
+        do {
+            summa = 0
+        }
+        trigger {
+            on start
+        }
+    }
+
+    event _set_value(new_value) {
+        do {
+            value = new_value
+        }
+    }
+
+    event _accumulator {
+        do {
+            summa = summa + value
+            instant[probability_is_last_event] = 0.001
+        }
+        trigger {
+            every 1d
+        }
+        choose {
+            instant[probability_is_last_event]: emit _set_value(0)
+        }
+    }
+
+}

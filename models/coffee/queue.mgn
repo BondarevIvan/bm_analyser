@@ -1,5 +1,4 @@
-
-model "Кофейня" {
+model "Queue" {
 
     function is_open(time) {
         hour = (time - floor(time)) * 24
@@ -11,29 +10,26 @@ model "Кофейня" {
         hour = frac_part_time * 24
 
         return if(
-                hour >= close_hour,
-                1 - frac_part_time + open_hour / 24 + tolerance,
-                if(hour <= open_hour, open_hour / 24 - frac_part_time + tolerance, 0)
-            )
+            hour >= close_hour,
+            1 - frac_part_time + open_hour / 24 + tolerance,
+            if(hour <= open_hour, open_hour / 24 - frac_part_time + tolerance, 0)
+        )
     }
 
     controls {
         default {
             open_hour = 8
             close_hour = 22
-            average_duration_order = 60 * 7 # s
-            average_count_clients_per_1h = 10
 
-            #
+            average_duration_order = 60 * 7 # s
+            average_count_clients_per_1h = 15
+
             average_wait = 5 * 60 + 30 # s
             std_wait = 30 # s
 
-            #
             count_masters = 4
         }
         limits {
-            open_hour in [8, 8]
-            close_hour in [22, 22]
         }
     }
 
@@ -82,13 +78,13 @@ model "Кофейня" {
         do {
             instant[is_open] = call is_open(TIME)
             instant[is_closed] = 1 - instant[is_open]
-            instant[day_to_open] = call time_to_open_as_days(TIME, 0.0001)
+            instant[days_to_open] = call time_to_open_as_days(TIME, 0.0001)
             instant[delay] = exponential(1/average_count_clients_per_1h) * 1h
         }
         choose {
             instant[is_open]: emit RegisterClient
                               emit VisitClientGenerator after instant[delay]
-            instant[is_closed]: emit VisitClientGenerator after instant[day_to_open] * 1d + instant[delay]
+            instant[is_closed]: emit VisitClientGenerator after instant[days_to_open] * 1d + instant[delay]
         }
     }
 

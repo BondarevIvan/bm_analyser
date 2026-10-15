@@ -7,7 +7,7 @@ from magnum.magnum import (
 import matplotlib.pyplot as plt
 
 MODEL_PATH = "models/coffee.mgn"
-SEEDS = list(range(100000, 100000 + 1800))
+SEEDS = list(range(100000, 100000 + 3000))
 HORIZON = 30
 THREADS = 8  # число параллельных процессов; сиды делятся между ними поровну
 
@@ -22,7 +22,6 @@ def run_seeds(seeds):
         count_processed = res['variables']['count_processed']['value'][-1]
         count_lost = res['variables']['count_lost']['value'][-1]
         out.append((seed, count_processed, count_lost))
-        print(seed, count_processed, count_lost)
     return out
 
 

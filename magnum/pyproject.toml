@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "magnum"
-version = "0.1.0"
-description = "Язык описания бизнес-модели как случайного процесса и движок его расчёта"
+version = "0.2.0"
+description = "Моделирование бизнеса как случайного потока событий на Python"
 requires-python = ">=3.9"
-dependencies = ["lark>=1.1"]
+dependencies = ["torch>=1.13"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
@@ -15,9 +15,6 @@ test = ["pytest>=7"]
 [tool.setuptools]
 packages = ["magnum"]
 
-[tool.setuptools.package-data]
-magnum = ["grammar.lark"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "tests"]
+pythonpath = ["."]

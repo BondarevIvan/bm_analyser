@@ -1,32 +1,21 @@
 """Исключения библиотеки."""
-from __future__ import annotations
 
 
 class MagnumError(Exception):
     """Базовое исключение библиотеки."""
 
-    def __init__(self, message: str, line: int | None = None, column: int | None = None):
+    def __init__(self, message: str):
         self.message = message
-        self.line = line
-        self.column = column
-        where = ""
-        if line is not None:
-            where = f"строка {line}" + (f", столбец {column}" if column is not None else "") + ": "
-        super().__init__(where + message)
-
-
-class MagnumSyntaxError(MagnumError):
-    """Текст модели не соответствует грамматике."""
+        super().__init__(message)
 
 
 class MagnumValidationError(MagnumError):
-    """Модель синтаксически корректна, но содержит смысловую ошибку
-    (неизвестное событие, неверное число аргументов и т.п.)."""
+    """Ошибка в описании модели (параметр вне своих границ, зарезервированное имя, неверный триггер и т.п.)."""
 
 
 class MagnumControlError(MagnumError):
-    """Переданные в запуск контролы неверны (неизвестное имя, выход за limits, форма массива)."""
+    """Переданные в запуск controls неверны (неизвестное имя, выход за границы, форма массива)."""
 
 
 class MagnumRuntimeError(MagnumError):
-    """Ошибка во время моделирования (деление на ноль, неопределённая переменная и т.п.)."""
+    """Ошибка во время моделирования (исключение в событии, неверный emit, превышен max_events и т.п.)."""

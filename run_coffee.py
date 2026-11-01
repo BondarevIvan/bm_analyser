@@ -1,51 +1,66 @@
-from concurrent.futures import ProcessPoolExecutor
-
-from magnum.magnum import (
-    load_model_file,
-    run_model
-)
-import matplotlib.pyplot as plt
-
-MODEL_PATH = "models/coffee.mgn"
-SEEDS = list(range(100000, 100000 + 3000))
-HORIZON = 30
-THREADS = 8  # число параллельных процессов; сиды делятся между ними поровну
+import magnum.magnum as mgn
 
 
-def run_seeds(seeds):
-    """Прогнать модель на части сидов (выполняется в отдельном процессе)."""
-    model = load_model_file(MODEL_PATH)  # каждый процесс загружает модель сам
-    out = []
-    for seed in seeds:
-        res = run_model(model, horizon=HORIZON, seed=seed, debug=False,
-                        record=["count_processed", "count_lost"])
-        count_processed = res['variables']['count_processed']['value'][-1]
-        count_lost = res['variables']['count_lost']['value'][-1]
-        out.append((seed, count_processed, count_lost))
-    return out
+def compute_hours(time: float):
+    seconds = 86400 * (time - int(time))
+    return int(seconds // 3600)
 
 
-def split(items, n):
-    """Разбить список на n почти равных частей."""
-    k, m = divmod(len(items), n)
-    return [items[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+def pretty_time(time: float):
+    seconds = 86400 * (time - int(time))
+    hours = int(seconds // 3600)
+    minute = int((seconds // 60) % 60)
+    int_seconds = int((seconds // 1) % 60)
+    return f"День {int(time):03d}. {hours:02d}:{minute:02d}:{int_seconds:02d}"
 
 
-if __name__ == "__main__":  # обязательно для multiprocessing на macOS/Windows
-    with ProcessPoolExecutor(max_workers=THREADS) as pool:
-        chunks = pool.map(run_seeds, split(SEEDS, THREADS))
-        rows = [row for chunk in chunks for row in chunk]
+class CoffeeQueue(mgn.Model):
 
-    processed = []
-    lost = []
-    for seed, count_processed, count_lost in rows:
-        processed.append(count_processed)
-        lost.append(count_lost)
+    average_wait_time = mgn.param(mgn.minutes(3))
+    std_wait_time = mgn.param(mgn.seconds(30))
+    count_masters = mgn.param(1)
 
-    plt.hist(processed, bins=20)
-    plt.savefig("processed.png")
-    plt.clf()
+    average_order = mgn.param(mgn.minutes(2), low=0, high=mgn.minutes(10))
+    std_order = mgn.param(mgn.seconds(20), low=0, high=mgn.minutes(5))
 
-    plt.hist(lost, bins=20)
-    plt.savefig("lost.png")
-    plt.clf()
+    clients_per_hour = mgn.param(15)
+    time_to_make_order = mgn.param(mgn.seconds(10))
+
+    @mgn.on_start
+    def init(self):
+        self.queue = mgn.Queue()
+        self.free_masters = self.count_masters
+        self._id_client = 0
+
+    def free_one_master(self):
+        self.free_masters += 1
+
+    def client_choose(self, id_client: int):
+        self.print("Клиент", id_client, "сделал заказ", f"({pretty_time(self.time)})")
+        self.free_masters -= 1
+        self.emit(self.free_one_master, after=max(0.0, self.rng.normal(self.average_order, self.std_order)))
+
+    @mgn.when(lambda model: len(model.queue) > 0 and model.free_masters > 0)
+    def start_new_order(self):
+        id_client = self.queue.pop()
+        self.print("Клиент", id_client, "делает заказ", f"({pretty_time(self.time)})")
+        self.emit(self.client_choose, id_client, after=self.time_to_make_order)
+
+    def client_leave(self, id_client: int):
+        if self.queue.remove(id_client):
+            self.print("Клиент не дождался", id_client, f"({pretty_time(self.time)})")
+
+    @mgn.arrival(rate="clients_per_hour", per=mgn.HOUR)
+    def arrive_client(self):
+        # 08:00-21:00
+        if not (20 >= compute_hours(self.time) >= 8):
+            return
+        self._id_client += 1
+        self.print("Клиент", self._id_client, "пришел", f"({pretty_time(self.time)})")
+        self.queue.push(self._id_client)
+        wait = max(0.0, self.rng.normal(self.average_wait_time, self.std_wait_time))
+        self.emit(self.client_leave, self._id_client, after=wait)
+
+
+if __name__ == "__main__":
+    result = CoffeeQueue.run(horizon=30, debug=True, sampling="on_change")

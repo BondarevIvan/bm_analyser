@@ -14,7 +14,7 @@ import copy
 import math
 import re
 
-from .parser import DURATION_UNITS
+from .units import DURATION_UNITS
 from .queues import plain as _copy  # копия массива / развёрнутая очередь и ресурс
 
 EPS = 1e-9

@@ -15,12 +15,16 @@
   состояние — а через него интенсивности (например, ``λ = 15 в час, если открыто, иначе 0``).
   Время расписания берётся из целых (структурных) параметров, как ``open_hour``.
 
-Эффекты детерминированы: никакой случайности внутри — вся она в критериях. Поэтому, зная
+Эффекты детерминированы, кроме одного явного источника случайности — ``self.choose(lambda m: веса)``:
+выбор варианта с вероятностями, заданными параметрами (например, сколько позиций в чеке). Выбор пишется
+в журнал, а его вероятность входит в правдоподобие слагаемым log p(выбранного варианта).
+Остальная случайность — в критериях. Поэтому, зная
 моменты природных событий и срабатываний таймеров, движок однозначно восстанавливает всю историю
 (решения ``when`` выводятся сами) и пишет правдоподобие:
 
     log L = Σ_rate [ log λ(s) в моменты событий − ∫ λ(s(t)) dt ]
           + Σ_timer [ log f(длительность) для сработавших + log S(возраст) для отменённых и незавершённых ]
+          + Σ_choose log p(выбранный вариант | s)
 
 Ограничение прототипа: интенсивности зависят от состояния и параметров; время суток входит в них
 только через состояние, которое меняют события расписания (кусочно-постоянные интенсивности).
@@ -29,6 +33,7 @@
 from __future__ import annotations
 
 import heapq
+from collections import deque
 import itertools
 import math
 import random as _random
@@ -160,6 +165,28 @@ class _Len:
         return self.n
 
 
+def _weights(fn, view):
+    """Веса вариантов choose как числа, нормированные к сумме 1."""
+    raw = fn(view)
+    if isinstance(raw, torch.Tensor):
+        w = [float(x) for x in raw.detach().reshape(-1)]
+    else:
+        w = [float(x.detach()) if isinstance(x, torch.Tensor) else float(x) for x in raw]
+    if not w or any(x < 0 for x in w) or sum(w) <= 0:
+        raise ValueError(f"choose: веса должны быть неотрицательны и не все нулевые, получено {w}")
+    tot = sum(w)
+    return [x / tot for x in w]
+
+
+def _pick(w, rng):
+    u, acc = rng.random(), 0.0
+    for i, wi in enumerate(w):
+        acc += wi
+        if u < acc:
+            return i
+    return len(w) - 1
+
+
 # ------------------------------------------------------------ процесс
 class Process:
     """Базовый класс. Наследник объявляет параметры (mg.param), таймеры (timer), метод init()
@@ -228,6 +255,23 @@ class Process:
     def cancel(self, timer_name, entity):
         self.__dict__["_hooks"][1](timer_name, entity)
 
+    def choose(self, probs, values=None):
+        """Случайный выбор варианта внутри эффекта.
+
+        probs — функция модели (как в критериях): probs(m) возвращает веса вариантов (список или
+        тензор; нормируются, сумма не обязана быть 1). Веса могут зависеть от параметров и состояния.
+        Возвращает индекс выбранного варианта, а если передан values — values[индекс]:
+
+            n_items = self.choose(lambda m: m.p_items, values=[1, 2, 3, 4])
+
+        Выбор пишется в журнал записью (t, "choose", индекс, "choice") и входит в правдоподобие.
+        """
+        hooks = self.__dict__["_hooks"]
+        if hooks is None or len(hooks) < 3:
+            raise RuntimeError("choose можно вызывать только из эффектов во время simulate / replay")
+        i = hooks[2](probs)
+        return i if values is None else values[i]
+
     # --- вид состояния для критериев
     def _signature(self, keys):
         """Часть состояния, которую читают интенсивности (для очереди — её длина)."""
@@ -240,6 +284,10 @@ class Process:
 
     def _rate_keys(self):
         """Какие переменные состояния читают интенсивности (по пробному вызову на текущем состоянии)."""
+        return self._probe_keys(type(self).rates.values())
+
+    def _probe_keys(self, fns):
+        """Какие переменные состояния читают функции fns (по пробному вызову на текущем состоянии)."""
         st = object.__getattribute__(self, "__dict__")["_state"]
         read = set()
 
@@ -250,7 +298,7 @@ class Process:
                     return st[name]
                 return 1.0                     # параметр: значение для пробы неважно
 
-        for fn in type(self).rates.values():
+        for fn in fns:
             try:
                 fn(Probe())
             except Exception:                  # noqa: BLE001 — проба может не пройти арифметику
@@ -262,13 +310,15 @@ class Process:
         st = {k: (_Len(v[1]) if isinstance(v, tuple) and v and v[0] == "len" else v) for k, v in sig}
         return _View(params, st)
 
-    def _resolve_whens(self):
+    def _resolve_whens(self, on_fire=None):
         fired = []
         again = True
         while again:
             again = False
             for name, cond in type(self).whens:
                 if cond(self):
+                    if on_fire is not None:      # запись в журнал — до эффекта, чтобы выборы choose шли после неё
+                        on_fire(name)
                     type(self).effects[name](self)
                     fired.append(name)
                     again = True
@@ -292,8 +342,9 @@ class Process:
     # ------------------------------------------------------------ симуляция
     @classmethod
     def simulate(cls, controls=None, seed=0, horizon=1.0):
-        """Прогон: возвращает журнал [(t, событие, сущность)] (природные события и таймеры; решения
-        ``when`` помечены отдельно) и итоговое состояние."""
+        """Прогон: возвращает журнал [(t, событие, сущность, вид)] и итоговое состояние.
+        Вид: "rate" / "timer" (природа), "when" / "daily" (выводятся сами), "choice" (выбор choose:
+        событие "choose", сущность — индекс варианта; идёт сразу после записи события, где сделан)."""
         rng = _random.Random(seed)
         p = {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in cls.resolve(controls).items()}
         m = cls._new(cls, p)
@@ -311,12 +362,19 @@ class Process:
         def cancel(name, ent):
             active.pop((name, ent), None)
 
-        m.__dict__["_hooks"] = (start, cancel)
+        def choose(fn):
+            i = _pick(_weights(fn, m), rng)
+            log.append((t, "choose", i, "choice"))
+            return i
+
+        def log_when(w):
+            log.append((t, w, None, "when"))
+
+        m.__dict__["_hooks"] = (start, cancel, choose)
         sched = cls._schedule({k: int(v) for k, v in p.items() if cls.params[k].integer}, horizon)
         si = 0
         m.init()
-        for w in m._resolve_whens():
-            log.append((t, w, None, "when"))
+        m._resolve_whens(log_when)
         while True:
             view = m
             lam = {e: float(fn(view)) for e, fn in cls.rates.items()}
@@ -349,8 +407,7 @@ class Process:
                 ev = cls.timers[name].fires
                 log.append((t, ev, ent, "timer"))
                 cls.effects[ev](m, ent)
-            for w in m._resolve_whens():
-                log.append((t, w, None, "when"))
+            m._resolve_whens(log_when)
         return log, dict(m._state)
 
     # ------------------------------------------------------------ правдоподобие
@@ -379,14 +436,27 @@ class Process:
             if t0 is not None:
                 cens[name].append(t - t0)
 
-        m.__dict__["_hooks"] = (start, cancel)
+        choices = deque(r[2] for r in log if r[3] == "choice")
+        picks, choice_keys = {}, {}
+
+        def choose(fn):
+            if not choices:
+                raise ValueError("в журнале меньше выборов choose, чем их делают эффекты")
+            i = choices.popleft()
+            if fn not in choice_keys:
+                choice_keys[fn] = tuple(sorted(m._probe_keys([fn])))
+            key = (fn, m._signature(choice_keys[fn]), i)
+            picks[key] = picks.get(key, 0) + 1
+            return i
+
+        m.__dict__["_hooks"] = (start, cancel, choose)
         m.init()
         m._resolve_whens()
         keys = tuple(sorted(keys)) if keys is not None else tuple(sorted(m._rate_keys()))
         seen = set(keys)
         # расписание движок знает сам: из журнала его записи не берём, а вставляем свои
         sched = [(ts, ev, None, "daily") for ts, ev in cls._schedule(structural, horizon)]
-        recs = [r for r in log if r[3] not in ("when", "daily")]   # решения выводятся из истории
+        recs = [r for r in log if r[3] not in ("when", "daily", "choice")]   # решения выводятся из истории
         merged = sorted(sched + recs, key=lambda r: (r[0], r[3] != "daily"))
         for rec in merged:
             tr, ev, ent, kind = rec
@@ -409,11 +479,13 @@ class Process:
             m._resolve_whens()
         if seen != set(keys):              # интенсивности читают больше, чем показала первая проба — заново
             return cls.replay(log, horizon, controls, keys=seen)
+        if choices:
+            raise ValueError(f"в журнале на {len(choices)} выборов choose больше, чем их делают эффекты")
         sig = m._signature(keys)
         exposure[sig] = exposure.get(sig, 0.0) + (horizon - t)
         for (name, ent), t0 in active.items():
             cens[name].append(horizon - t0)
-        return {"count": count, "exposure": exposure,
+        return {"count": count, "exposure": exposure, "choices": picks,
                 "done": {n: torch.tensor(v, dtype=torch.float64) for n, v in done.items()},
                 "cens": {n: torch.tensor(v, dtype=torch.float64) for n, v in cens.items()}}
 
@@ -438,4 +510,7 @@ class Process:
             c = c[c > 0]
             if len(c):
                 ll = ll + d.log_survival(c).sum()
+        for (fn, sig, i), n in stats.get("choices", {}).items():
+            w = torch.as_tensor(fn(cls._view(p, sig)), dtype=torch.float64).reshape(-1)
+            ll = ll + n * (torch.log(w[i]) - torch.log(w.sum()))
         return ll

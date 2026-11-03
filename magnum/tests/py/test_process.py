@@ -123,3 +123,41 @@ def test_daily_schedule_limits_arrivals_and_likelihood():
     assert math.isclose(ll, len(arrivals) * math.log(lam) - lam * 5 * 12 * mg.HOUR, rel_tol=1e-9)
     night = Hours.replay(arrivals + [(5 + 2 * mg.HOUR - 5, "arrive", None, "rate")], 5)   # приход в 2 часа ночи
     assert Hours.log_likelihood(night, {}).item() == -math.inf
+
+
+class _Receipt(Process):
+    """Заказ с 1–3 позициями: число позиций — choose внутри эффекта прихода."""
+    lam = mg.param(30.0)
+    p_items = mg.param([0.5, 0.3, 0.2])
+
+    def init(self):
+        self.items = 0
+        self.orders = 0
+
+    @rate(lambda m: m.lam)
+    def arrived(self):
+        self.items += self.choose(lambda m: m.p_items, values=[1, 2, 3])
+        self.orders += 1
+
+
+def test_choose_simulate_replay_likelihood():
+    log, st = _Receipt.simulate(horizon=40.0, seed=4)
+    picks = [r[2] for r in log if r[3] == "choice"]
+    assert len(picks) == st["orders"] and st["items"] == sum(i + 1 for i in picks)
+    stats = _Receipt.replay(log, 40.0)
+    assert sum(stats["choices"].values()) == st["orders"]
+    # максимум правдоподобия по p_items — частоты выборов
+    freq = torch.tensor([picks.count(i) / len(picks) for i in range(3)], dtype=torch.float64)
+    z = torch.zeros(3, dtype=torch.float64, requires_grad=True)
+    opt = torch.optim.Adam([z], lr=0.1)
+    for _ in range(300):
+        opt.zero_grad()
+        loss = -_Receipt.log_likelihood(stats, {"p_items": torch.softmax(z, 0)})
+        loss.backward()
+        opt.step()
+    assert torch.allclose(torch.softmax(z, 0).detach(), freq, atol=1e-3)
+
+
+def test_choose_outside_effect_fails():
+    with pytest.raises(RuntimeError):
+        _Receipt._new(_Receipt, {}).choose(lambda m: [1.0])

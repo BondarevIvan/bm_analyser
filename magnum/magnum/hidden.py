@@ -22,7 +22,7 @@ import random as _random
 
 import torch
 
-from .process import Process, _View
+from .process import Process, _View, _pick, _weights
 from .queues import Queue
 
 
@@ -81,7 +81,12 @@ def smc_day(cls: type[Process], obs_times, observed, end, controls=None, n=100, 
                 P.obs.pop(ent, None)
             else:
                 P.hid.pop((name, ent), None)
-        P.m.__dict__["_hooks"] = (start, cancel)
+
+        def choose(fn):                              # предложение = априорное, вес не меняется
+            i = _pick(_weights(fn, P.m), rng)
+            P.log = ((P.t, "choose", i, "choice"), P.log)
+            return i
+        P.m.__dict__["_hooks"] = (start, cancel, choose)
 
     def resolve_whens(m):
         again = True
@@ -298,16 +303,18 @@ def smc_day(cls: type[Process], obs_times, observed, end, controls=None, n=100, 
 
 # ------------------------------------------------------------ статистики и EM
 def merge_stats(stats_list):
-    count, exposure, done, cens = {}, {}, {}, {}
+    count, exposure, done, cens, choices = {}, {}, {}, {}, {}
     for st in stats_list:
         for k, v in st["count"].items():
             count[k] = count.get(k, 0) + v
         for k, v in st["exposure"].items():
             exposure[k] = exposure.get(k, 0.0) + v
+        for k, v in st.get("choices", {}).items():
+            choices[k] = choices.get(k, 0) + v
         for nm in st["done"]:
             done.setdefault(nm, []).append(st["done"][nm])
             cens.setdefault(nm, []).append(st["cens"][nm])
-    return {"count": count, "exposure": exposure,
+    return {"count": count, "exposure": exposure, "choices": choices,
             "done": {k: torch.cat(v) for k, v in done.items()},
             "cens": {k: torch.cat(v) for k, v in cens.items()}}
 

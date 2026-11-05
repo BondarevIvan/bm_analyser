@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кухня и доставка</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #fff; --text: #1d1d1b; --muted: #6b6b66;
+    --border: #e2e2dd; --accent: #2f6fdb; --bar: #4c86e8; --avg: #d9480f; --q: #2b8a3e; --err: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --card: #20201f; --text: #ececea; --muted: #9a9a94;
+      --border: #333331; --accent: #6b9cf0; --bar: #5b8fe6; --avg: #ff8a4c; --q: #69db7c; --err: #ff6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px; display: grid; gap: 16px;
+         grid-template-columns: 340px 1fr; align-items: start; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  h1 { grid-column: 1 / -1; margin: 0; font-size: 22px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  aside.card { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
+  @media (max-width: 800px) { aside.card { position: static; max-height: none; } }
+  details { border-top: 1px solid var(--border); padding: 10px 0 4px; }
+  details:first-of-type { border-top: 0; padding-top: 0; }
+  summary { cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+            color: var(--muted); margin-bottom: 6px; }
+  label { display: grid; grid-template-columns: 1fr 96px; align-items: center; gap: 8px; margin: 6px 0; }
+  input { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+          background: var(--bg); color: var(--text); font: inherit; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .grid4 label { grid-template-columns: 1fr; gap: 2px; margin: 0; font-size: 12px; color: var(--muted); text-align: center; }
+  .hint { font-size: 12px; color: var(--muted); margin: 4px 0 6px; }
+  .hint.bad { color: var(--err); }
+  .seed { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin: 12px 0; }
+  .seed label { margin: 0; }
+  .btn2 { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+          color: var(--text); font: inherit; cursor: pointer; }
+  button.run { width: 100%; padding: 10px; border: 0; border-radius: 8px; background: var(--accent);
+               color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button.run:disabled { opacity: .6; cursor: wait; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; margin-bottom: 14px; }
+  .stat .v { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat.avg .v { color: var(--avg); }
+  .stat.q .v { color: var(--q); }
+  canvas { width: 100%; height: 380px; display: block; }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 13px; flex-wrap: wrap; }
+  .row input { width: 80px; }
+  .error { color: var(--err); white-space: pre-wrap; }
+  .empty { color: var(--muted); padding: 60px 0; text-align: center; }
+  .url { grid-template-columns: 1fr; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Кухня и доставка</h1>
+
+  <aside class="card">
+    <form id="form">
+      <details open>
+        <summary>Поток заказов</summary>
+        <label><span>Заказов в час</span><input name="clients_per_hour" type="number" step="any" min="0" value="10"></label>
+        <div class="hint">Вероятность числа позиций в чеке</div>
+        <div class="grid4" id="itemProbs">
+          <label>1 поз.<input data-group="probability_count_wishes_in_receipt" type="number" step="any" min="0" value="0.4"></label>
+          <label>2 поз.<input data-group="probability_count_wishes_in_receipt" type="number" step="any" min="0" value="0.3"></label>
+          <label>3 поз.<input data-group="probability_count_wishes_in_receipt" type="number" step="any" min="0" value="0.2"></label>
+          <label>4 поз.<input data-group="probability_count_wishes_in_receipt" type="number" step="any" min="0" value="0.1"></label>
+        </div>
+        <div class="hint" data-hint="probability_count_wishes_in_receipt"></div>
+      </details>
+
+      <details open>
+        <summary>Кухня</summary>
+        <label><span>Обжарка, мин</span><input name="frying_time" type="number" step="any" min="0" value="4"></label>
+        <label><span>Сборка бургера, мин</span><input name="burger_assembly_time" type="number" step="any" min="0" value="1"></label>
+        <label><span>Упаковка, мин</span><input name="packaging_time" type="number" step="any" min="0" value="0.5"></label>
+        <label><span>Котлет на гриле одновременно</span><input name="max_burgers_at_time" data-int type="number" step="1" min="1" value="6"></label>
+        <label><span>Сборщиков</span><input name="count_assemblers" data-int type="number" step="1" min="1" value="2"></label>
+        <label><span>Упаковщиков</span><input name="count_packers" data-int type="number" step="1" min="1" value="1"></label>
+      </details>
+
+      <details open>
+        <summary>Доставка</summary>
+        <label><span>Доставщиков</span><input name="count_deliveries" data-int type="number" step="1" min="1" value="5"></label>
+        <label><span>Отдать заказ, мин</span><input name="handover_time" type="number" step="any" min="0" value="1"></label>
+        <div class="hint">Вероятность адреса</div>
+        <div id="addrBox"></div>
+        <div class="hint" data-hint="address_probs"></div>
+      </details>
+
+      <details>
+        <summary>Дороги, мин</summary>
+        <div id="roadBox"></div>
+      </details>
+
+      <details open>
+        <summary>Расчёт</summary>
+        <label><span>Дней</span><input name="days" data-int type="number" step="1" min="1" value="30"></label>
+        <div class="seed">
+          <label><span>seed</span><input id="seed" name="seed" data-int type="number" step="1" value="1"></label>
+          <button type="button" class="btn2" id="rnd" title="Случайный seed">🎲</button>
+        </div>
+        <label class="url"><input id="url" type="text" title="Адрес сервиса"></label>
+      </details>
+
+      <button class="run" id="submit" type="submit">Рассчитать</button>
+    </form>
+  </aside>
+
+  <section class="card">
+    <div class="stats" id="stats" hidden>
+      <div class="stat avg"><div class="v" id="sAvg">—</div><div class="k">доставка, среднее</div></div>
+      <div class="stat q"><div class="v" id="sP50">—</div><div class="k">медиана</div></div>
+      <div class="stat q"><div class="v" id="sP90">—</div><div class="k">90% заказов быстрее</div></div>
+      <div class="stat"><div class="v" id="sWait">—</div><div class="k">ждёт доставщика</div></div>
+      <div class="stat"><div class="v" id="sKitchen">—</div><div class="k">на кухне</div></div>
+      <div class="stat"><div class="v" id="sN">—</div><div class="k">доставлено заказов</div></div>
+    </div>
+    <div id="msg" class="empty">Задайте параметры и нажмите «Рассчитать»</div>
+    <canvas id="chart" hidden></canvas>
+    <div class="row" id="binsRow" hidden>
+      Корзин: <input id="bins" type="number" min="1" max="200" value="30">
+      <span>· время от оформления заказа до передачи клиенту, мин</span>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const form = $('form');
+
+// Граф дорог — как NODES / EDGES / ROAD_MINUTES / ADDRESS_PROBS в burgers.py
+const NODES = ["Точка", "Центр", "Вокзал", "Университет", "Парк", "Микрорайон"];
+const ADDRESSES = [1, 2, 3, 4, 5];
+const EDGES = [[0, 1], [0, 3], [1, 2], [1, 3], [1, 4], [2, 4], [3, 5], [4, 5]];
+const ROAD_MINUTES = [4, 6, 5, 3, 9, 7, 8, 6];
+const ADDRESS_PROBS = [0.3, 0.2, 0.2, 0.15, 0.15];
+
+$('addrBox').innerHTML = ADDRESSES.map((a, i) =>
+  `<label><span>${NODES[a]}</span><input data-group="address_probs" type="number" step="any" min="0" value="${ADDRESS_PROBS[i]}"></label>`
+).join('');
+$('roadBox').innerHTML = EDGES.map(([u, v], i) =>
+  `<label><span>${NODES[u]} — ${NODES[v]}</span><input data-group="road_times" type="number" step="any" min="0.01" value="${ROAD_MINUTES[i]}"></label>`
+).join('');
+
+// Сервис — рядом со страницей: /cooking_ui/full -> /cooking_ui/cooking
+$('url').value = location.protocol.startsWith('http')
+  ? new URL('cooking', location.href).href
+  : 'http://localhost:8000/cooking';
+
+$('rnd').addEventListener('click', () => { $('seed').value = Math.floor(Math.random() * 1e6); });
+
+const group = name => [...form.querySelectorAll(`input[data-group="${name}"]`)].map(el => parseFloat(el.value) || 0);
+
+// Подсказки для вероятностей: сумма и как сервер их нормирует
+function checkProbs(name) {
+  const p = group(name), s = p.reduce((a, b) => a + b, 0);
+  const hint = form.querySelector(`[data-hint="${name}"]`);
+  const bad = s <= 0 || p.some(v => v < 0);
+  hint.classList.toggle('bad', bad);
+  hint.textContent = bad ? 'Должны быть ≥ 0 и не все нулевые'
+    : Math.abs(s - 1) < 1e-9 ? 'Сумма = 1'
+    : `Сумма = ${+s.toFixed(4)} → ` + p.map(v => Math.round(v / s * 100) + '%').join(' / ');
+  return bad;
+}
+const PROB_GROUPS = ['probability_count_wishes_in_receipt', 'address_probs'];
+form.addEventListener('input', e => { if (PROB_GROUPS.includes(e.target.dataset.group)) checkProbs(e.target.dataset.group); });
+PROB_GROUPS.forEach(checkProbs);
+
+function collect() {
+  const body = {};
+  for (const el of form.querySelectorAll('input[name]')) {
+    body[el.name] = el.hasAttribute('data-int') ? parseInt(el.value, 10) : parseFloat(el.value);
+  }
+  for (const g of [...PROB_GROUPS, 'road_times']) body[g] = group(g);
+  return body;
+}
+
+let last = null;
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (PROB_GROUPS.map(checkProbs).some(Boolean)) return;
+  const btn = $('submit');
+  btn.disabled = true; btn.textContent = 'Считаю…';
+  try {
+    const r = await fetch($('url').value, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(collect())
+    });
+    const text = await r.text();
+    if (!r.ok) throw new Error(`HTTP ${r.status}\n${text}`);
+    const data = JSON.parse(text);
+    if (!Array.isArray(data.delivery_times)) throw new Error('В ответе нет delivery_times — на сервере старая версия burgers.py?');
+    last = data;
+    render();
+  } catch (err) {
+    $('stats').hidden = $('chart').hidden = $('binsRow').hidden = true;
+    $('msg').hidden = false; $('msg').className = 'error';
+    $('msg').textContent = 'Ошибка: ' + err.message +
+      (err instanceof TypeError ? '\n(Сервис недоступен или блокирует CORS)' : '');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Рассчитать';
+  }
+});
+
+$('bins').addEventListener('input', () => last && render());
+window.addEventListener('resize', () => last && render());
+
+const fmt = v => Number.isFinite(v) ? (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1)) : '—';
+function quantile(sorted, q) {
+  if (!sorted.length) return NaN;
+  const pos = q * (sorted.length - 1), i = Math.floor(pos), j = Math.min(i + 1, sorted.length - 1);
+  return sorted[i] + (sorted[j] - sorted[i]) * (pos - i);
+}
+
+function render() {
+  const t = last.delivery_times, sorted = [...t].sort((a, b) => a - b);
+  const p50 = quantile(sorted, 0.5), p90 = quantile(sorted, 0.9);
+  $('msg').hidden = true; $('stats').hidden = false;
+  $('sAvg').textContent = fmt(last.delivery_average) + ' мин';
+  $('sP50').textContent = fmt(p50) + ' мин';
+  $('sP90').textContent = fmt(p90) + ' мин';
+  $('sWait').textContent = fmt(last.courier_wait_average) + ' мин';
+  $('sKitchen').textContent = fmt(last.average) + ' мин';
+  $('sN').textContent = t.length;
+  if (!t.length) {
+    $('chart').hidden = $('binsRow').hidden = true;
+    $('msg').hidden = false; $('msg').className = 'empty'; $('msg').textContent = 'Ни одного доставленного заказа';
+    return;
+  }
+  $('chart').hidden = $('binsRow').hidden = false;
+  drawHist(t, sorted, [
+    { v: last.delivery_average, color: '--avg', label: 'среднее', dash: [6, 4] },
+    { v: p90, color: '--q', label: '90%', dash: [2, 3] },
+  ], Math.max(1, parseInt($('bins').value, 10) || 30));
+}
+
+function drawHist(times, sorted, marks, nBins) {
+  const cv = $('chart'), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement);
+  const c = n => css.getPropertyValue(n).trim();
+
+  let lo = sorted[0], hi = sorted[sorted.length - 1];
+  if (hi === lo) { lo -= 0.5; hi += 0.5; }
+  const step = (hi - lo) / nBins;
+  const counts = new Array(nBins).fill(0);
+  for (const t of times) counts[Math.min(nBins - 1, Math.floor((t - lo) / step))]++;
+  const maxC = Math.max(...counts);
+
+  const pad = { l: 44, r: 12, t: 24, b: 36 };
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+  const x = v => pad.l + (v - lo) / (hi - lo) * pw;
+  const y = v => pad.t + ph - v / maxC * ph;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillStyle = c('--muted'); ctx.strokeStyle = c('--border'); ctx.lineWidth = 1;
+
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  const yTicks = Math.min(maxC, 5);
+  for (let i = 0; i <= yTicks; i++) {
+    const v = Math.round(maxC * i / yTicks), yy = Math.round(y(v)) + .5;
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
+    ctx.fillText(v, pad.l - 6, yy);
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const xTicks = Math.max(2, Math.min(8, Math.floor(pw / 80)));
+  for (let i = 0; i <= xTicks; i++) {
+    const v = lo + (hi - lo) * i / xTicks;
+    ctx.fillText(fmt(v), x(v), pad.t + ph + 8);
+  }
+
+  ctx.fillStyle = c('--bar');
+  const gap = (pw / nBins) > 6 ? 1 : 0;
+  counts.forEach((n, i) => {
+    if (!n) return;
+    const x0 = x(lo + i * step), x1 = x(lo + (i + 1) * step);
+    ctx.fillRect(x0 + gap, y(n), x1 - x0 - 2 * gap, pad.t + ph - y(n));
+  });
+
+  marks.forEach(({ v, color, label, dash }, k) => {
+    if (!Number.isFinite(v)) return;
+    const ax = Math.round(x(Math.min(Math.max(v, lo), hi))) + .5;
+    ctx.strokeStyle = c(color); ctx.lineWidth = 2; ctx.setLineDash(dash);
+    ctx.beginPath(); ctx.moveTo(ax, pad.t); ctx.lineTo(ax, pad.t + ph); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = c(color); ctx.textBaseline = 'bottom';
+    ctx.textAlign = ax > W - 140 ? 'right' : 'left';
+    ctx.fillText(` ${label} = ${fmt(v)} `, ax, pad.t - 2 + (k ? 14 : 0));
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Симуляция кухни</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #fff; --text: #1d1d1b; --muted: #6b6b66;
+    --border: #e2e2dd; --accent: #2f6fdb; --bar: #4c86e8; --avg: #d9480f; --err: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --card: #20201f; --text: #ececea; --muted: #9a9a94;
+      --border: #333331; --accent: #6b9cf0; --bar: #5b8fe6; --avg: #ff8a4c; --err: #ff6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 16px; display: grid; gap: 16px;
+         grid-template-columns: 320px 1fr; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  h1 { grid-column: 1 / -1; margin: 0; font-size: 22px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  fieldset { border: 0; padding: 0; margin: 0 0 14px; }
+  legend { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+  label { display: grid; grid-template-columns: 1fr 100px; align-items: center; gap: 8px; margin: 6px 0; }
+  label span small { color: var(--muted); }
+  input, select { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+                  background: var(--bg); color: var(--text); font: inherit; }
+  .url { grid-template-columns: 1fr; }
+  .probs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .probs label { grid-template-columns: 1fr; gap: 2px; margin: 0; font-size: 12px; color: var(--muted); text-align: center; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .hint.bad { color: var(--err); }
+  button { width: 100%; padding: 10px; border: 0; border-radius: 8px; background: var(--accent);
+           color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: wait; }
+  .stats { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 12px; }
+  .stat .v { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat.avg .v { color: var(--avg); }
+  canvas { width: 100%; height: 360px; display: block; }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 13px; }
+  .row input { width: 80px; }
+  .error { color: var(--err); white-space: pre-wrap; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Симуляция бургерной</h1>
+
+  <form id="form" class="card">
+    <fieldset>
+      <legend>Сервис</legend>
+      <label class="url"><input id="url" type="text"></label>
+      <label><span>Метод</span>
+        <select id="method"><option>POST</option><option>GET</option></select>
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Поток клиентов</legend>
+      <label><span>Клиентов в час</span><input name="clients_per_hour" type="number" step="any" min="0" value="10.0"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Позиций в чеке — вероятности</legend>
+      <div class="probs">
+        <label>1 поз.<input data-prob type="number" step="any" min="0" value="0.4"></label>
+        <label>2 поз.<input data-prob type="number" step="any" min="0" value="0.3"></label>
+        <label>3 поз.<input data-prob type="number" step="any" min="0" value="0.2"></label>
+        <label>4 поз.<input data-prob type="number" step="any" min="0" value="0.1"></label>
+      </div>
+      <div class="hint" id="probHint"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Время операций</legend>
+      <label><span>время обжарки (минуты)</span><input name="frying_time" type="number" step="any" min="0" value="4.0"></label>
+      <label><span>время сборки (минуты)</span><input name="burger_assembly_time" type="number" step="any" min="0" value="1.0"></label>
+      <label><span>время упаковки (минуты)</span><input name="packaging_time" type="number" step="any" min="0" value="0.5"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Ресурсы</legend>
+      <label><span>максимальное число котлет одновременно</span><input name="max_burgers_at_time" data-int type="number" step="1" min="1" value="6"></label>
+      <label><span>число сборщиков</span><input name="count_assemblers" data-int type="number" step="1" min="1" value="2"></label>
+      <label><span>число упаковщиков</span><input name="count_packers" data-int type="number" step="1" min="1" value="1"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Прочее</legend>
+      <label><span>seed</span><input name="seed" data-int type="number" step="1" value="1"></label>
+      <label><span>горизонт</span><input name="days" data-int type="number" step="1" value="30"></label>
+    </fieldset>
+
+    <button id="submit" type="submit">Запустить</button>
+  </form>
+
+  <section class="card">
+    <div class="stats" id="stats" hidden>
+      <div class="stat avg"><div class="v" id="avg">—</div><div class="k">average</div></div>
+      <div class="stat"><div class="v" id="n">—</div><div class="k">наблюдений</div></div>
+      <div class="stat"><div class="v" id="min">—</div><div class="k">min</div></div>
+      <div class="stat"><div class="v" id="max">—</div><div class="k">max</div></div>
+    </div>
+    <div id="msg" class="empty">Задайте параметры и нажмите «Запустить»</div>
+    <canvas id="chart" hidden></canvas>
+    <div class="row" id="binsRow" hidden>
+      Корзин: <input id="bins" type="number" min="1" max="200" value="20">
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const form = $('form');
+// Если страницу отдаёт тот же сервис — берём его origin, иначе localhost:8000
+$('url').value = (location.protocol.startsWith('http') ? location.origin : 'http://localhost:8000') + '/cooking';
+
+let last = null;
+
+const probInputs = () => [...form.querySelectorAll('input[data-prob]')];
+const probs = () => probInputs().map(el => parseFloat(el.value) || 0);
+
+// Подсказка: сумма и итоговые (нормированные) вероятности — сервер нормирует их сам
+function updateProbHint() {
+  const p = probs(), s = p.reduce((a, b) => a + b, 0), hint = $('probHint');
+  const bad = s <= 0 || p.some(v => v < 0);
+  hint.classList.toggle('bad', bad);
+  if (bad) { hint.textContent = 'Вероятности должны быть ≥ 0 и не все нулевые'; return bad; }
+  hint.textContent = Math.abs(s - 1) < 1e-9
+    ? 'Сумма = 1'
+    : `Сумма = ${+s.toFixed(4)}, будет нормировано: ` + p.map(v => Math.round(v / s * 100) + '%').join(' / ');
+  return bad;
+}
+probInputs().forEach(el => el.addEventListener('input', updateProbHint));
+updateProbHint();
+
+function collect() {
+  const body = {};
+  for (const el of form.querySelectorAll('input[name]')) {
+    body[el.name] = el.hasAttribute('data-int') ? parseInt(el.value, 10) : parseFloat(el.value);
+  }
+  body.probability_count_wishes_in_receipt = probs();
+  return body;
+}
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (updateProbHint()) return;
+  const btn = $('submit');
+  btn.disabled = true; btn.textContent = 'Считаю…';
+  try {
+    const body = collect();
+    const method = $('method').value;
+    let url = $('url').value, opts = { method };
+    if (method === 'GET') {
+      const q = new URLSearchParams();
+      for (const [k, v] of Object.entries(body)) [].concat(v).forEach(x => q.append(k, x));
+      url += '?' + q;
+    }
+    else opts = { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+
+    const r = await fetch(url, opts);
+    const text = await r.text();
+    if (!r.ok) throw new Error(`HTTP ${r.status}\n${text}`);
+    const data = JSON.parse(text);
+    if (!Array.isArray(data.times)) throw new Error('В ответе нет поля times');
+    last = data;
+    render();
+  } catch (err) {
+    $('stats').hidden = $('chart').hidden = $('binsRow').hidden = true;
+    $('msg').hidden = false;
+    $('msg').className = 'error';
+    $('msg').textContent = 'Ошибка: ' + err.message +
+      (err instanceof TypeError ? '\n(Сервис недоступен или блокирует CORS)' : '');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Запустить';
+  }
+});
+
+$('bins').addEventListener('input', () => last && render());
+window.addEventListener('resize', () => last && render());
+
+const fmt = v => Number.isFinite(v) ? (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2)) : '—';
+
+function render() {
+  const { times, average } = last;
+  $('msg').hidden = true;
+  $('stats').hidden = false;
+  $('avg').textContent = `${fmt(average)} мин.`;
+  $('n').textContent = times.length;
+  $('min').textContent = times.length ? `${fmt(Math.min(...times))} мин.` : '—';
+  $('max').textContent = times.length ? `${fmt(Math.max(...times))} мин.` : '—';
+  if (!times.length) {
+    $('chart').hidden = $('binsRow').hidden = true;
+    $('msg').hidden = false; $('msg').className = 'empty'; $('msg').textContent = 'Список times пуст';
+    return;
+  }
+  $('chart').hidden = $('binsRow').hidden = false;
+  drawHist(times, average, Math.max(1, parseInt($('bins').value, 10) || 20));
+}
+
+function drawHist(times, average, nBins) {
+  const cv = $('chart'), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement);
+  const c = n => css.getPropertyValue(n).trim();
+
+  let lo = Math.min(...times, average), hi = Math.max(...times, average);
+  if (hi === lo) { lo -= 0.5; hi += 0.5; }
+  const step = (hi - lo) / nBins;
+  const counts = new Array(nBins).fill(0);
+  for (const t of times) counts[Math.min(nBins - 1, Math.floor((t - lo) / step))]++;
+  const maxC = Math.max(...counts);
+
+  const pad = { l: 44, r: 12, t: 20, b: 36 };
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+  const x = v => pad.l + (v - lo) / (hi - lo) * pw;
+  const y = v => pad.t + ph - v / maxC * ph;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillStyle = c('--muted'); ctx.strokeStyle = c('--border'); ctx.lineWidth = 1;
+
+  // сетка и ось Y
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  const yTicks = Math.min(maxC, 5);
+  for (let i = 0; i <= yTicks; i++) {
+    const v = Math.round(maxC * i / yTicks), yy = Math.round(y(v)) + .5;
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
+    ctx.fillText(v, pad.l - 6, yy);
+  }
+  // ось X
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const xTicks = Math.max(2, Math.min(8, Math.floor(pw / 80)));
+  for (let i = 0; i <= xTicks; i++) {
+    const v = lo + (hi - lo) * i / xTicks;
+    ctx.fillText(fmt(v), x(v), pad.t + ph + 8);
+  }
+
+  // столбцы
+  ctx.fillStyle = c('--bar');
+  const gap = (pw / nBins) > 6 ? 1 : 0;
+  counts.forEach((n, i) => {
+    if (!n) return;
+    const x0 = x(lo + i * step), x1 = x(lo + (i + 1) * step);
+    ctx.fillRect(x0 + gap, y(n), x1 - x0 - 2 * gap, pad.t + ph - y(n));
+  });
+
+  // линия среднего
+  const ax = Math.round(x(average)) + .5;
+  ctx.strokeStyle = c('--avg'); ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+  ctx.beginPath(); ctx.moveTo(ax, pad.t); ctx.lineTo(ax, pad.t + ph); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = c('--avg'); ctx.textBaseline = 'bottom';
+  ctx.textAlign = ax > W - 120 ? 'right' : 'left';
+  ctx.fillText(' average = ' + fmt(average) + ' ', ax, pad.t);
+}
+</script>
+</body>
+</html>

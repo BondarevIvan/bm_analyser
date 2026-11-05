@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import heapq
+import inspect
 from collections import deque
 import itertools
 import math
@@ -138,10 +139,33 @@ def daily(at):
 
 
 class timer:  # noqa: N801 — читается как объявление
-    """Задержка для сущности: dist(m) — распределение длительности, fires — событие по истечении."""
+    """Задержка для сущности: dist(m) — распределение длительности, fires — событие по истечении.
 
-    def __init__(self, dist, fires):
+    Распределение может зависеть и от самой сущности: dist(m, ent), например упаковка заказа
+    ent = (номер, позиций) длится позиций × время упаковки:
+
+        packing = timer(lambda m, order: LogNormal(order[1] * m.packaging_time, ...), fires="packed")
+
+    Тогда сущность должна сама нести всё, от чего зависит длительность (состояние dist не видит:
+    для правдоподобия длительность каждой сущности оценивается по её собственному распределению).
+
+    key(ent) — от какой части сущности зависит распределение (по умолчанию — от всей). Сущности
+    с одинаковым ключом в правдоподобии считаются одной группой, это намного быстрее:
+    key=lambda order: order[1] — распределение зависит только от числа позиций, не от номера заказа.
+    """
+
+    def __init__(self, dist, fires, key=None):
         self.dist, self.fires, self.name = dist, fires, None
+        self.key = key if key is not None else (lambda ent: ent)
+        try:
+            n_args = len(inspect.signature(dist).parameters)
+        except (TypeError, ValueError):
+            n_args = 1
+        self.per_entity = n_args >= 2
+
+    def at(self, view, ent=None):
+        """Распределение длительности для сущности ent."""
+        return self.dist(view, ent) if self.per_entity else self.dist(view)
 
     def __set_name__(self, owner, name):
         self.name = name
@@ -196,6 +220,7 @@ class Process:
         super().__init_subclass__(**kw)
         cls.params, cls.timers, cls.rates, cls.whens, cls.effects = {}, {}, {}, [], {}
         cls.dailies = {}
+        whens = {}
         for klass in reversed(cls.__mro__):
             for name, v in vars(klass).items():
                 if isinstance(v, param):
@@ -209,10 +234,14 @@ class Process:
                     elif kind == "daily":
                         cls.dailies[name] = fn
                     else:
-                        cls.whens.append((name, fn))
+                        whens[name] = fn
                     cls.effects[name] = v
                 elif callable(v) and not name.startswith("_") and name != "init":
-                    cls.effects.setdefault(name, v)
+                    cls.effects[name] = v
+        # эффект — то, что найдёт Python по MRO (наследник перекрывает родителя, в т.ч. при
+        # множественном наследовании — сборке модели из частей Kitchen + Delivery)
+        cls.effects = {n: getattr(cls, n) for n in cls.effects}
+        cls.whens = list(whens.items())
         cls.fired_by = {t.fires: name for name, t in cls.timers.items()}
 
     # --- параметры
@@ -353,7 +382,7 @@ class Process:
         log = []
 
         def start(name, ent):
-            d = cls.timers[name].dist(m).sample(rng)
+            d = cls.timers[name].at(m, ent).sample(rng)
             key = (name, ent)
             tok = next(seq)
             active[key] = tok
@@ -426,6 +455,9 @@ class Process:
         active = {}
         done = {n: [] for n in cls.timers}
         cens = {n: [] for n in cls.timers}
+        # для таймеров, чьё распределение зависит от сущности, — сущности параллельно длительностям
+        done_ent = {n: [] for n, tm in cls.timers.items() if tm.per_entity}
+        cens_ent = {n: [] for n in done_ent}
         count, exposure = {}, {}
 
         def start(name, ent):
@@ -435,6 +467,8 @@ class Process:
             t0 = active.pop((name, ent), None)
             if t0 is not None:
                 cens[name].append(t - t0)
+                if name in cens_ent:
+                    cens_ent[name].append(ent)
 
         choices = deque(r[2] for r in log if r[3] == "choice")
         picks, choice_keys = {}, {}
@@ -475,6 +509,8 @@ class Process:
                 if t0 is None:
                     raise ValueError(f"в журнале {ev} для {ent}, но таймер {name} для него не запущен")
                 done[name].append(t - t0)
+                if name in done_ent:
+                    done_ent[name].append(ent)
                 cls.effects[ev](m, ent)
             m._resolve_whens()
         if seen != set(keys):              # интенсивности читают больше, чем показала первая проба — заново
@@ -485,9 +521,29 @@ class Process:
         exposure[sig] = exposure.get(sig, 0.0) + (horizon - t)
         for (name, ent), t0 in active.items():
             cens[name].append(horizon - t0)
+            if name in cens_ent:
+                cens_ent[name].append(ent)
         return {"count": count, "exposure": exposure, "choices": picks,
+                "done_ent": done_ent, "cens_ent": cens_ent,
                 "done": {n: torch.tensor(v, dtype=torch.float64) for n, v in done.items()},
                 "cens": {n: torch.tensor(v, dtype=torch.float64) for n, v in cens.items()}}
+
+    @staticmethod
+    def _ll_per_entity(tm, view, done, done_ent, cens, cens_ent):
+        """Вклад таймера с распределением от сущности: сущности с одинаковым ключом — одной группой."""
+        ll = torch.zeros((), dtype=torch.float64)
+        for xs, ents, kind in ((done, done_ent, "log_prob"), (cens, cens_ent, "log_survival")):
+            groups, rep_ent = {}, {}
+            for x, ent in zip(xs.tolist(), ents):
+                if kind == "log_survival" and x <= 0:
+                    continue
+                k = tm.key(ent)
+                groups.setdefault(k, []).append(x)
+                rep_ent.setdefault(k, ent)
+            for k, g in groups.items():
+                d = tm.dist(view, rep_ent[k])
+                ll = ll + getattr(d, kind)(torch.tensor(g, dtype=torch.float64)).sum()
+        return ll
 
     @classmethod
     def log_likelihood(cls, stats, controls):
@@ -502,8 +558,13 @@ class Process:
                     ll = ll + n * torch.log(lam)     # λ = 0 при n > 0 -> −inf: журнал невозможен
                 if T:
                     ll = ll - lam * T
+        view = _View(p, {})
         for name, tm in cls.timers.items():
-            d = tm.dist(_View(p, {}))
+            if tm.per_entity:
+                ll = ll + cls._ll_per_entity(tm, view, stats["done"][name], stats["done_ent"][name],
+                                             stats["cens"][name], stats["cens_ent"][name])
+                continue
+            d = tm.dist(view)
             if len(stats["done"][name]):
                 ll = ll + d.log_prob(stats["done"][name]).sum()
             c = stats["cens"][name]

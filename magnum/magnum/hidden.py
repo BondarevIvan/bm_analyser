@@ -57,8 +57,11 @@ def smc_day(cls: type[Process], obs_times, observed, end, controls=None, n=100, 
     pt = cls.resolve(controls)
     pf = _floats(pt)
     view = _View(pt, {})
+    if cls.timers[tname].per_entity:
+        raise NotImplementedError(f"наблюдаемый таймер {tname}: распределение от сущности пока не поддерживается")
     lpf, lsf, cdf, ppf = cls.timers[tname].dist(view).floats()
-    hidden_dist = {nm: tm.dist(view) for nm, tm in cls.timers.items() if nm != tname}
+    hidden_dist = {nm: tm.dist(view) for nm, tm in cls.timers.items() if nm != tname and not tm.per_entity}
+    entity_timers = {nm: tm for nm, tm in cls.timers.items() if nm != tname and tm.per_entity}
     structural = {k: int(v) for k, v in pt.items() if cls.params[k].integer}
     sched = cls._schedule(structural, end)
     rates = list(cls.rates.items())
@@ -71,7 +74,8 @@ def smc_day(cls: type[Process], obs_times, observed, end, controls=None, n=100, 
             if name == tname:
                 P.obs[ent] = [P.t, P.t]              # [начало, до какого момента учтено выживание]
             else:
-                d = hidden_dist[name].sample(rng)
+                d = (entity_timers[name].dist(view, ent) if name in entity_timers
+                     else hidden_dist[name]).sample(rng)
                 tok = next(seq)
                 P.hid[(name, ent)] = tok
                 heapq.heappush(P.heap, (P.t + d, tok, name, ent))
@@ -304,6 +308,7 @@ def smc_day(cls: type[Process], obs_times, observed, end, controls=None, n=100, 
 # ------------------------------------------------------------ статистики и EM
 def merge_stats(stats_list):
     count, exposure, done, cens, choices = {}, {}, {}, {}, {}
+    done_ent, cens_ent = {}, {}
     for st in stats_list:
         for k, v in st["count"].items():
             count[k] = count.get(k, 0) + v
@@ -314,7 +319,12 @@ def merge_stats(stats_list):
         for nm in st["done"]:
             done.setdefault(nm, []).append(st["done"][nm])
             cens.setdefault(nm, []).append(st["cens"][nm])
+        for nm, v in st.get("done_ent", {}).items():
+            done_ent.setdefault(nm, []).extend(v)
+        for nm, v in st.get("cens_ent", {}).items():
+            cens_ent.setdefault(nm, []).extend(v)
     return {"count": count, "exposure": exposure, "choices": choices,
+            "done_ent": done_ent, "cens_ent": cens_ent,
             "done": {k: torch.cat(v) for k, v in done.items()},
             "cens": {k: torch.cat(v) for k, v in cens.items()}}
 

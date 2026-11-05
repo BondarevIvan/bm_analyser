@@ -161,3 +161,72 @@ def test_choose_simulate_replay_likelihood():
 def test_choose_outside_effect_fails():
     with pytest.raises(RuntimeError):
         _Receipt._new(_Receipt, {}).choose(lambda m: [1.0])
+
+
+class _Pack(Process):
+    """Упаковка заказа длится позиций × время на позицию: таймер с распределением от сущности."""
+    lam = mg.param(20.0)
+    per_item = mg.param(0.01)
+
+    packing = timer(lambda m, order: Exponential(order[1] * m.per_item), fires="packed", key=lambda o: o[1])
+
+    def init(self):
+        self.n = 0
+        self.done = 0
+
+    @rate(lambda m: m.lam)
+    def arrived(self):
+        self.n += 1
+        self.start("packing", (self.n, 1 + self.n % 3))
+
+    def packed(self, order):
+        self.done += 1
+
+
+def test_timer_per_entity_mle():
+    log, st = _Pack.simulate(horizon=60.0, seed=5)
+    stats = _Pack.replay(log, 60.0)
+    assert len(stats["done_ent"]["packing"]) == st["done"]
+    z = torch.tensor(math.log(0.05), dtype=torch.float64, requires_grad=True)
+    opt = torch.optim.Adam([z], lr=0.05)
+    for _ in range(400):
+        opt.zero_grad()
+        (-_Pack.log_likelihood(stats, {"per_item": torch.exp(z)})).backward()
+        opt.step()
+    assert abs(math.exp(z.item()) - 0.01) < 0.002
+
+
+class _PartA(Process):
+    def init(self):
+        self.out = mg.Queue()
+        self.who = ""
+
+    @rate(lambda m: 5.0)
+    def make(self):
+        self.out.push(1)
+        self.who = "A"
+
+
+class _PartB(Process):
+    def init(self):
+        self.taken = 0
+
+    @when(lambda m: len(m.out) > 0)
+    def take(self):
+        self.out.pop()
+        self.taken += 1
+
+
+class _Both(_PartA, _PartB):
+    def init(self):
+        _PartA.init(self)
+        _PartB.init(self)
+
+    def make(self):          # без декоратора: критерий остаётся от _PartA, эффект — наследника
+        self.out.push(1)
+        self.who = "both"
+
+
+def test_parts_share_queue_and_override_effect():
+    _, st = _Both.simulate(horizon=10.0, seed=1)
+    assert st["taken"] > 0 and len(st["out"]) == 0 and st["who"] == "both"
